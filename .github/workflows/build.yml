@@ -428,8 +428,18 @@ jobs:
         run: |
           set -eux
           sudo apt-get update
-          sudo apt-get install -y cmake meson ninja-build nasm pkg-config curl zip unzip
+          sudo apt-get install -y cmake ninja-build nasm pkg-config curl zip unzip
 
+      - name: Set up Python for Meson
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install Meson 1.7.2
+        run: |
+          python -m pip install meson==1.7.2
+          meson --version
+          
       - name: Cross-build Android deps
         run: |
           set -eux
