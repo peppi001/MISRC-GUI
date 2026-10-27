@@ -8861,8 +8861,18 @@ static void gui_ui_poll_android_results(gui_app_t *app)
 }
 #endif
 
+#if defined(__ANDROID__)
+#include "gui_android_pinch.h"
+#endif
+
 // Handle UI interactions
 void gui_handle_interactions(gui_app_t *app) {
+#if defined(__ANDROID__)
+    if (gui_android_pinch_process(app)) {
+        gui_ui_set_click_consumed();
+        return;
+    }
+#endif
 #if defined(__APPLE__)
     if(gui_cxadc_macos_ui_handle(app))return;
 #endif
