@@ -5,6 +5,11 @@
  */
 
 #include "gui_ui.h"
+#if defined(__ANDROID__)
+#include "../core/gui_android_viewport.h"
+// Gesture-filtered single taps replace native mouse-press events on Android.
+#define IsMouseButtonPressed(button) gui_android_viewport_click_pressed(button)
+#endif
 #include "gui_dropdown.h"
 #include "gui_popup.h"
 #include "gui_device_label.h"
@@ -171,7 +176,11 @@ Vector2 gui_ui_get_render_scale(void)
 
 Vector2 gui_ui_get_mouse_position(void)
 {
+#if defined(__ANDROID__)
+    Vector2 position = gui_android_viewport_pointer();
+#else
     Vector2 position = GetMousePosition();
+#endif
     float scale = gui_ui_get_scale_factor();
     position.x /= scale;
     position.y /= scale;
@@ -8861,14 +8870,10 @@ static void gui_ui_poll_android_results(gui_app_t *app)
 }
 #endif
 
-#if defined(__ANDROID__)
-#include "gui_android_pinch.h"
-#endif
-
 // Handle UI interactions
 void gui_handle_interactions(gui_app_t *app) {
 #if defined(__ANDROID__)
-    if (gui_android_pinch_process(app)) {
+    if (gui_android_viewport_block_controls()) {
         gui_ui_set_click_consumed();
         return;
     }
