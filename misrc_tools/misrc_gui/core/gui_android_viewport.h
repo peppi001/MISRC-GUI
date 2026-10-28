@@ -15,6 +15,7 @@ bool gui_android_viewport_click_pressed(int button);
 Vector2 gui_android_viewport_pointer(void);
 bool gui_android_viewport_begin_canvas(void);
 void gui_android_viewport_present_canvas(bool active);
+void gui_android_viewport_restore_canvas_after_texture(void);
 void gui_android_viewport_shutdown(void);
 
 #if defined(GUI_ANDROID_VIEWPORT_IMPLEMENTATION)
@@ -36,6 +37,7 @@ typedef struct {
     double queued_time;
     RenderTexture2D canvas;
     int canvas_width, canvas_height;
+    bool canvas_active;  // We are currently drawing the UI into the outer canvas.
 } gui_android_viewport_state_t;
 
 static gui_android_viewport_state_t s_android_view = { .zoom = 1.0f };
@@ -200,6 +202,7 @@ bool gui_android_viewport_begin_canvas(void)
         return false;
     }
     BeginTextureMode(v->canvas);
+    v->canvas_active = true;
     return true;
 }
 
@@ -207,6 +210,7 @@ void gui_android_viewport_present_canvas(bool active)
 {
     if (!active) return;
     gui_android_viewport_state_t *v = &s_android_view;
+    v->canvas_active = false;
     EndTextureMode();
     ClearBackground(BLACK);
     const Rectangle source = { 0, 0, (float)v->canvas_width,
@@ -217,8 +221,28 @@ void gui_android_viewport_present_canvas(bool active)
     DrawTexturePro(v->canvas.texture, source, dest, (Vector2){0, 0}, 0, WHITE);
 }
 
+
+/* raylib's EndTextureMode() always binds the *screen* framebuffer, even when
+ * it is called inside another BeginTextureMode(). The FFT/phosphor renderer
+ * uses its own ping-pong render textures; without restoring our outer canvas,
+ * everything drawn after those passes goes to the screen and is subsequently
+ * overwritten by the zoomed canvas. Keep the same orthographic projection:
+ * our canvas has exactly GetRenderWidth()/GetRenderHeight() dimensions.
+ *
+ * Call this immediately after an inner EndTextureMode(). Never do it outside
+ * the UI frame and never do it after ending our own outer texture pass.
+ */
+void gui_android_viewport_restore_canvas_after_texture(void)
+{
+    const gui_android_viewport_state_t *v = &s_android_view;
+    if (!v->canvas_active || !v->canvas.id) return;
+    rlDrawRenderBatchActive();
+    rlEnableFramebuffer(v->canvas.id);
+}
+
 void gui_android_viewport_shutdown(void)
 {
+    s_android_view.canvas_active = false;
     if (s_android_view.canvas.id) UnloadRenderTexture(s_android_view.canvas);
     s_android_view.canvas = (RenderTexture2D){0};
     SetMouseOffset(0, 0);
