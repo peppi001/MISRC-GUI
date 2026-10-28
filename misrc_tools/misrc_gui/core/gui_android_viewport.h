@@ -222,22 +222,25 @@ void gui_android_viewport_present_canvas(bool active)
 }
 
 
-/* raylib's EndTextureMode() always binds the *screen* framebuffer, even when
- * it is called inside another BeginTextureMode(). The FFT/phosphor renderer
- * uses its own ping-pong render textures; without restoring our outer canvas,
- * everything drawn after those passes goes to the screen and is subsequently
- * overwritten by the zoomed canvas. Keep the same orthographic projection:
- * our canvas has exactly GetRenderWidth()/GetRenderHeight() dimensions.
+/* EndTextureMode() does not restore the enclosing render-texture state:
+ * it selects the screen framebuffer AND resets raylib's viewport, projection
+ * and current-FBO bookkeeping. Rebinding only the framebuffer ID therefore
+ * leaves later Clay elements with a different projection than earlier ones
+ * (visible as a shifted panel after the first phosphor/FFT pass on Android).
  *
- * Call this immediately after an inner EndTextureMode(). Never do it outside
- * the UI frame and never do it after ending our own outer texture pass.
+ * Re-enter the existing canvas through raylib rather than binding its FBO
+ * directly. BeginTextureMode() restores all of that state WITHOUT clearing
+ * or reallocating the canvas, so previous UI drawing is preserved. The
+ * phosphor renderer restores the outer Clay model-view transform afterward.
+ *
+ * Call this only after an inner EndTextureMode() while the Android canvas
+ * is active, never after gui_android_viewport_present_canvas().
  */
 void gui_android_viewport_restore_canvas_after_texture(void)
 {
     const gui_android_viewport_state_t *v = &s_android_view;
     if (!v->canvas_active || !v->canvas.id) return;
-    rlDrawRenderBatchActive();
-    rlEnableFramebuffer(v->canvas.id);
+    BeginTextureMode(v->canvas);
 }
 
 void gui_android_viewport_shutdown(void)
