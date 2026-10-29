@@ -5049,6 +5049,21 @@ static void render_version_info_window(gui_app_t *app)
         {
             static char net_status[160];
             gui_net_status_string(app, net_status, sizeof(net_status));
+            /* Warn about actual RF queue pressure/dropouts without claiming the
+             * physical LAN is necessarily the bottleneck. Server and legacy
+             * Client statistics are independent from the monitor transport. */
+            bool rf_transport_warning = false;
+            if (app->settings.net_mode == GUI_NET_MODE_SERVER) {
+                rf_transport_warning = atomic_load(&app->net_rf_server_stream_drops) > 0 ||
+                    atomic_load(&app->net_audio_server_stream_drops) > 0 ||
+                    atomic_load(&app->net_rf_server_queue_bytes) >= 48U * 1024U * 1024U ||
+                    atomic_load(&app->net_audio_server_queue_bytes) >= 48U * 1024U * 1024U;
+            } else if (app->settings.net_mode == GUI_NET_MODE_CLIENT) {
+                rf_transport_warning = atomic_load(&app->net_rf_client_interruptions) > 0 ||
+                    atomic_load(&app->net_audio_client_interruptions) > 0;
+            }
+            Color net_status_color = rf_transport_warning
+                ? (Color){255, 170, 80, 255} : COLOR_TEXT;
             CLAY(CLAY_ID("VersionInfoNetStatusRow"), {
                 .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }, .childGap = 10 }
             }) {
@@ -5057,7 +5072,7 @@ static void render_version_info_window(gui_app_t *app)
                         CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_NORMAL, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
                 }
                 CLAY_TEXT(make_string(net_status),
-                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(COLOR_TEXT) }));
+                    CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .textColor = to_clay_color(net_status_color) }));
             }
         }
         // Credits (without license/year text).
@@ -7465,10 +7480,47 @@ static bool render_main_panels(gui_app_t *app) {
             strstr(raw_status_gate, "timed out") != NULL ||
             strstr(raw_status_gate, "Capture stopped:") != NULL;
     }
+    /* A separate network warning in the status bar: never overwrite the
+     * capture/device status_message or mask a more urgent existing error.
+     * 'Stream interrupted' does not prove the physical LAN is too slow. */
+    bool rf_transport_banner = false;
+    bool rf_transport_critical = false;
+    static char rf_transport_banner_text[96];
+    if (!status_is_error && app->settings.net_mode == GUI_NET_MODE_SERVER) {
+        uint_fast64_t rf_drops = atomic_load(&app->net_rf_server_stream_drops);
+        uint_fast64_t au_drops = atomic_load(&app->net_audio_server_stream_drops);
+        size_t rf_q = atomic_load(&app->net_rf_server_queue_bytes);
+        size_t au_q = atomic_load(&app->net_audio_server_queue_bytes);
+        if (rf_drops || au_drops) {
+            snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
+                     "Stream overload RF:%llu Audio:%llu", (unsigned long long)rf_drops,
+                     (unsigned long long)au_drops);
+            rf_transport_banner = rf_transport_critical = true;
+        } else if (rf_q >= 48U * 1024U * 1024U || au_q >= 48U * 1024U * 1024U) {
+            snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
+                     "Stream queue high RF:%u%% Audio:%u%%",
+                     (unsigned)((rf_q * 100) / (64U * 1024U * 1024U)),
+                     (unsigned)((au_q * 100) / (64U * 1024U * 1024U)));
+            rf_transport_banner = true;
+        }
+    } else if (!status_is_error && app->settings.net_mode == GUI_NET_MODE_CLIENT) {
+        uint_fast64_t rf = atomic_load(&app->net_rf_client_interruptions);
+        uint_fast64_t au = atomic_load(&app->net_audio_client_interruptions);
+        if (rf || au) {
+            snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
+                     "Stream interruptions RF:%llu Audio:%llu",
+                     (unsigned long long)rf, (unsigned long long)au);
+            rf_transport_banner = rf_transport_critical = true;
+        }
+    }
+    if (rf_transport_banner) {
+        raw_status_gate = rf_transport_banner_text;
+        if (rf_transport_critical) status_is_error = true;
+    }
     // Decide error rows below, once the complete message and fixed readout
     // widths are known. Normal recording status is redundant with the timer.
     bool status_two_rows = false;
-    bool show_status_message = status_is_error ||
+    bool show_status_message = rf_transport_banner || status_is_error ||
         (!status_minimal && !app->is_recording);
     /* Keep free-space visible by default and let the dynamic budget contract
      * gaps/widths first; only hide it as a last resort. Error status still
@@ -7545,12 +7597,14 @@ static bool render_main_panels(gui_app_t *app) {
                  "%02d:%02d:%02d", rec_hours, rec_mins, rec_secs);
     }
 
-    const char *raw_status = (app->status_message[0] != '\0')
-        ? app->status_message
-        : (app->is_capturing ? "Capturing..." : "Ready");
+    const char *raw_status = rf_transport_banner ? rf_transport_banner_text :
+        ((app->status_message[0] != '\0') ? app->status_message :
+          (app->is_capturing ? "Capturing..." : "Ready"));
     Color status_color = COLOR_TEXT_DIM;
     if (status_is_error) {
         status_color = COLOR_CLIP_RED;
+    } else if (rf_transport_banner) {
+        status_color = COLOR_METER_YELLOW;
     } else if (strstr(raw_status, "Requesting") != NULL ||
                strstr(raw_status, "Reconnecting") != NULL ||
                strstr(raw_status, "Waiting") != NULL ||
