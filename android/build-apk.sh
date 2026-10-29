@@ -24,7 +24,14 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 ANDROID_HOME="${ANDROID_HOME:-$HOME/Android/Sdk}"
 BUILD_DIR="${BUILD_DIR:-$REPO_ROOT/build-android}"
-DEPS_PREFIX="${DEPS_PREFIX:-$REPO_ROOT/.deps/install-android-arm64}"
+ANDROID_ABI="${ANDROID_ABI:-arm64-v8a}"
+case "$ANDROID_ABI" in
+  arm64-v8a|x86_64) ;;
+  *) echo "ERROR: unsupported ANDROID_ABI: $ANDROID_ABI" >&2; exit 1 ;;
+esac
+DEPS_ARCH="$ANDROID_ABI"
+[[ "$ANDROID_ABI" == "arm64-v8a" ]] && DEPS_ARCH=arm64
+DEPS_PREFIX="${DEPS_PREFIX:-$REPO_ROOT/.deps/install-android-$DEPS_ARCH}"
 KEYSTORE="${KEYSTORE:-$SCRIPT_DIR/debug.keystore}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/.ci-artifacts/android-apk}"
 
@@ -121,13 +128,13 @@ test -f "$WORK/dex/classes.dex"
 
 # --- 4. Add native libraries (libmisrc_gui.so + libhsdaoh.so) ---
 log "adding native libs..."
-mkdir -p "$WORK/libdir/lib/arm64-v8a"
-cp "$BUILD_DIR/libmisrc_gui.so" "$WORK/libdir/lib/arm64-v8a/"
-cp "$DEPS_PREFIX/lib/libhsdaoh.so" "$WORK/libdir/lib/arm64-v8a/"
-# NOTE: no -j flag — the lib/arm64-v8a/ path prefix MUST be preserved (Android
+mkdir -p "$WORK/libdir/lib/$ANDROID_ABI"
+cp "$BUILD_DIR/libmisrc_gui.so" "$WORK/libdir/lib/$ANDROID_ABI/"
+cp "$DEPS_PREFIX/lib/libhsdaoh.so" "$WORK/libdir/lib/$ANDROID_ABI/"
+# NOTE: no -j flag — the lib/<abi>/ path prefix MUST be preserved (Android
 # only loads .so files from lib/<abi>/ inside the APK). -0 stores uncompressed
 # so zipalign can page-align the .so files.
-( cd "$WORK/libdir" && zip -0 "$WORK/base.apk" lib/arm64-v8a/*.so )
+( cd "$WORK/libdir" && zip -0 "$WORK/base.apk" lib/"$ANDROID_ABI"/*.so )
 
 # --- 5. Zipalign ---
 log "zipaligning..."
@@ -159,7 +166,11 @@ log "verifying signature..."
 
 # --- 9. Output ---
 mkdir -p "$OUT_DIR"
+# Keep the established ARM64 release filename (also checked by ci_guard_tests.py).
 OUTPUT="$OUT_DIR/Android_MISRC_GUI_${VERSION}_arm64.apk"
+if [[ "$ANDROID_ABI" == "x86_64" ]]; then
+  OUTPUT="$OUT_DIR/Android_MISRC_GUI_${VERSION}_x86_64.apk"
+fi
 cp "$WORK/signed.apk" "$OUTPUT"
 chmod +x "$OUTPUT"
 
