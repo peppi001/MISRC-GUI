@@ -127,7 +127,8 @@ if host_cpu_family == 'x86_64'
       nasm_flags += '-DPREFIX'
     endif
     nasm_flags += ['-f', 'win64']
-  elif host_system == 'linux' or host_system == 'bsd' # The BSDs are close enough, right?
+  elif host_system == 'linux' or host_system == 'bsd' or host_system == 'android'
+    # Android x86_64 uses ELF64 NASM objects, just like Linux x86_64.
     if debug_build
       nasm_flags += '-gdwarf'
     endif
