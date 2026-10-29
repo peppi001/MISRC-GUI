@@ -623,22 +623,24 @@ void gui_net_status_string(const gui_app_t *app, char *buf, size_t len) {
     }
     if (s_client) {
         if (s_client->monitor_only) {
-            if (gui_monitor_client_connected()) {
-                snprintf(buf, len, "Monitor & Remote connected %s:%u",
-                         app->settings.net_client_host, (unsigned)app->settings.net_client_port);
+            int reason=gui_monitor_client_last_error();
+            bool established=gui_monitor_client_connected();
+            if(gui_monitor_client_running() && reason!=0){
+                const char *detail=reason==2?"incompatible MISRC-M/1 peer":
+                                   reason==3?"invalid MISRC-M/2 status":"status request unreachable";
+                snprintf(buf,len,"Monitor & Remote: NETWORK ERROR (%s, %u failures); %s",
+                         detail,gui_monitor_client_status_dropouts(),
+                         established?"session retained":"awaiting first connection");
+            } else if(established && gui_monitor_client_preview_error()){
+                snprintf(buf,len,"Monitor & Remote: PREVIEW ERROR (%u failures); session retained",
+                         gui_monitor_client_preview_dropouts());
+            } else if(established){
+                snprintf(buf,len,"Monitor & Remote connected %s:%u (status errors: %u, preview: %u)",
+                         app->settings.net_client_host,(unsigned)app->settings.net_client_port,
+                         gui_monitor_client_status_dropouts(),gui_monitor_client_preview_dropouts());
             } else if (gui_monitor_client_running()) {
-                int reason=gui_monitor_client_last_error();
-                if(reason==2){
-                    snprintf(buf,len,"Monitor & Remote: incompatible MISRC-M/1 server (requires M/2)");
-                } else if(reason==3){
-                    snprintf(buf,len,"Monitor & Remote: invalid server protocol (requires MISRC-M/2)");
-                } else if(reason==1){
-                    snprintf(buf,len,"Monitor & Remote: cannot reach %s:%u",
-                             app->settings.net_client_host,(unsigned)app->settings.net_client_port);
-                } else {
-                    snprintf(buf,len,"Monitor & Remote verifying %s:%u (MISRC-M/2 required)",
-                             app->settings.net_client_host,(unsigned)app->settings.net_client_port);
-                }
+                snprintf(buf,len,"Monitor & Remote verifying %s:%u (MISRC-M/2 required)",
+                         app->settings.net_client_host,(unsigned)app->settings.net_client_port);
             } else {
                 snprintf(buf,len,"Monitor & Remote: %d server(s) discovered; select or Connect",
                          gui_net_discovered_count());

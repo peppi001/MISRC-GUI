@@ -1,6 +1,7 @@
 /* Independent M-Server/M-Client transport. No full RF /rf or /baseband.
  * MRD5/Zstd-1 carries original Harry waveform/FFT display values only. */
 #include "gui_monitor_transport.h"
+#include "gui_monitor_session_state.h"
 #include "gui_remote_display.h"
 #include "gui_remote_fs.h"
 #include "gui_monitor_settings.h"
@@ -51,6 +52,9 @@ typedef int mon_sock_t;
 /* Display preview uses the original float32 waveform/FFT frame (MRD5)
  * and Zstd compression level 1. HTTP control remains MISRC-M/2. */
 #define MON_PREVIEW_PERIOD_MS 100u
+/* A 400 ms recv timeout caused spurious failures on busy M-Servers/Wi-Fi.
+ * It bounds an individual send/recv wait, not the entire HTTP request. */
+#define MON_HTTP_TIMEOUT_MS 1500
 #define MON_REMOTE_PATH GUI_REMOTE_FS_PATH
 #define MON_BROWSER_WIRE 40000u
 static atomic_uint g_preview_transfers;
@@ -95,6 +99,8 @@ static struct {
     atomic_bool reset_clips_pending[2];
     /* 0=none, 1=unreachable, 2=incompatible M-protocol, 3=invalid status. */
     atomic_int last_error;
+    atomic_uint status_dropouts,preview_dropouts;
+    atomic_bool preview_error;
 } g_client;
 
 
@@ -735,7 +741,7 @@ static int mon_get(const char *host,uint16_t port,const char *path,char *dst,siz
     for(struct addrinfo *p=addr;p;p=p->ai_next){
         sock=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
         if(sock==MON_BAD)continue;
-        mon_timeouts(sock,400);
+        mon_timeouts(sock,MON_HTTP_TIMEOUT_MS);
         if(connect(sock,p->ai_addr,(int)p->ai_addrlen)==0)break;
         mon_close(sock);sock=MON_BAD;
     }
@@ -774,7 +780,7 @@ static int mon_get_preview(const char *host,uint16_t port){
     for(struct addrinfo *p=addr;p;p=p->ai_next){
         sock=socket(p->ai_family,p->ai_socktype,p->ai_protocol);
         if(sock==MON_BAD)continue;
-        mon_timeouts(sock,400);
+        mon_timeouts(sock,MON_HTTP_TIMEOUT_MS);
         if(connect(sock,p->ai_addr,(int)p->ai_addrlen)==0)break;
         mon_close(sock);sock=MON_BAD;
     }
@@ -871,14 +877,22 @@ static void mon_worker_output(void){
 }
 static int mon_client_thread(void *ctx){
     (void)ctx;
+    gui_monitor_session_state_t session={0};
     while(!atomic_load(&g_client.stopping)){
         char response[4096];
         int status_rc=mon_get(g_client.host,g_client.port,"/monitor/status",response,sizeof(response));
-        if(status_rc==0 && strstr(response,"\"protocol\":\"MISRC-M/2\"")!=NULL){
+        uint64_t status_state=0;
+        bool verified=status_rc==0 &&
+            strstr(response,"\"protocol\":\"MISRC-M/2\"")!=NULL &&
+            mon_json_u64(response,"state",&status_state) && status_state<=2;
+        if(verified){
+            if(gui_monitor_session_status_ok(&session)){
+                fprintf(stderr,"[M-CLIENT] Status recovered after network dropout; session preserved\n");
+                gui_app_set_status(g_client.app,"Monitor network recovered; session retained");
+            }
             atomic_store(&g_client.last_error,0);
-            int state=0;unsigned rate=0,frames=0,errors=0,missed=0;
-            char *p=strstr(response,"\"state\":");
-            if(p)state=atoi(p+8);
+            int state=(int)status_state;unsigned rate=0,frames=0,errors=0,missed=0;
+            char *p=NULL;
             p=strstr(response,"\"sample_rate\":");
             if(p)rate=(unsigned)strtoul(p+14,NULL,10);
             p=strstr(response,"\"frames\":");
@@ -930,11 +944,25 @@ static int mon_client_thread(void *ctx){
             atomic_store(&g_client.app->net_connected,true);
             /* Skipping the preview fetch when stopping halves the
              * gui_monitor_client_stop join wait (a mode switch stopping the
-             * monitor thread does not wait out a second 400 ms transfer). */
+             * monitor thread does not wait out another preview transfer). */
             if(state>0 && !atomic_load(&g_client.stopping)){
-                if(mon_get_preview(g_client.host,g_client.port)!=0)
-                    gui_rd_client_clear();
-            }else if(state<=0) gui_rd_client_clear();
+                if(mon_get_preview(g_client.host,g_client.port)!=0){
+                    /* An individual preview failure is not a user Disconnect.
+                     * Retain the last complete frame and expose its staleness. */
+                    if(gui_monitor_session_preview_failed(&session)){
+                        fprintf(stderr,"[M-CLIENT] Preview request failed; last valid frame retained\n");
+                        gui_app_set_status(g_client.app,"Monitor preview error: showing last valid frame");
+                    }
+                }else if(gui_monitor_session_preview_ok(&session)){
+                    fprintf(stderr,"[M-CLIENT] Preview stream recovered\n");
+                }
+                atomic_store(&g_client.preview_error,session.preview_failed);
+                atomic_store(&g_client.preview_dropouts,session.preview_errors);
+            }else if(state<=0){
+                gui_rd_client_clear();  /* Server explicitly reports idle. */
+                session.preview_failed=false;
+                atomic_store(&g_client.preview_error,false);
+            }
             /* M-Client's server-owned filesystem browser runs only on this
              * network worker. GUI remains responsive on slow NAS mounts. */
             mon_worker_folders();
@@ -981,29 +1009,34 @@ static int mon_client_thread(void *ctx){
                 (void)mon_get(g_client.host,g_client.port,"/monitor/record?on=0",response,sizeof(response));
         }else{
             int error_reason=1; /* Network, socket, or HTTP error. */
-            if(status_rc==0){
+            if(status_rc==0)
                 error_reason=strstr(response,"\"protocol\":\"MISRC-M/1\"") ? 2 : 3;
-            }
+            bool first=gui_monitor_session_status_failed(&session);
+            atomic_store(&g_client.status_dropouts,session.status_errors);
             atomic_store(&g_client.last_error,error_reason);
-            atomic_store(&g_client.connected,false);
-            atomic_store(&g_client.record_stats_valid,false);
-            for(int ch=0;ch<2;ch++) atomic_store(&g_client.reset_clips_pending[ch],false);
-            atomic_store(&g_client.peer_state,0);
-            atomic_store(&g_client.peer_frames,0);
-            atomic_store(&g_client.peer_errors,0);
-            atomic_store(&g_client.peer_missed,0);
-            atomic_store(&g_client.app->net_connected,false);
-            gui_rd_client_clear();
-            gui_monitor_local_save_client_stop();
-            mon_cfg_disconnect();
-            fs_lock();g_fs_client.output_valid=false;
-            g_fs_client.ready=false;fs_unlock();
-            /* Do not execute stale capture commands after a later reconnect. */
+            if(first || session.consecutive_status_errors==10 ||
+               (session.consecutive_status_errors%100)==0){
+                fprintf(stderr,"[M-CLIENT] Status error %d (%u consecutive, %u total); %s\n",
+                    error_reason,session.consecutive_status_errors,session.status_errors,
+                    session.established?"established session retained":"still waiting for first connection");
+                if(first && session.established)
+                    gui_app_set_status(g_client.app,"Monitor NETWORK ERROR: session retained; retrying");
+            }
+            /* DO NOT clear session, remote display, peer counters, synchronized
+             * settings, local-save receiver or the remote device catalogue here.
+             * Transient request errors must not cause Connect/Disconnect loops.
+             * The explicit stop/restart path below owns all of that teardown. */
+            /* Drop commands whose delivery cannot be confirmed. Never silently
+             * replay a stale Record/Stop click after network recovery. */
             gui_app_t *app=g_client.app;
-            atomic_store(&app->net_cmd_start,false);
-            atomic_store(&app->net_cmd_stop,false);
-            atomic_store(&app->net_cmd_record_on,false);
-            atomic_store(&app->net_cmd_record_off,false);
+            bool pending=atomic_exchange(&app->net_cmd_start,false);
+            pending=atomic_exchange(&app->net_cmd_stop,false)||pending;
+            pending=atomic_exchange(&app->net_cmd_record_on,false)||pending;
+            pending=atomic_exchange(&app->net_cmd_record_off,false)||pending;
+            if(pending){
+                fprintf(stderr,"[M-CLIENT] Discarded unconfirmed capture/record command during network error\n");
+                gui_app_set_status(app,"Monitor network error: command not sent; retry when healthy");
+            }
         }
         thrd_sleep_ms(MON_PREVIEW_PERIOD_MS);
     }
@@ -1036,6 +1069,9 @@ int gui_monitor_client_start(gui_app_t *app,const char *host,uint16_t port){
     atomic_store(&g_client.peer_errors,0);
     atomic_store(&g_client.peer_missed,0);
     atomic_store(&g_client.last_error,0);
+    atomic_store(&g_client.status_dropouts,0);
+    atomic_store(&g_client.preview_dropouts,0);
+    atomic_store(&g_client.preview_error,false);
     for(int ch=0;ch<2;ch++) atomic_store(&g_client.reset_clips_pending[ch],false);
     if(thrd_create(&g_client.thread,mon_client_thread,NULL)!=thrd_success)return -1;
     atomic_store(&g_client.running,true);
@@ -1066,6 +1102,7 @@ void gui_monitor_client_stop(void){
     atomic_store(&g_client.peer_errors,0);
     atomic_store(&g_client.peer_missed,0);
     atomic_store(&g_client.last_error,0);
+    atomic_store(&g_client.preview_error,false);
     g_client.app=NULL;
     fs_lock();memset(&g_fs_client,0,sizeof(g_fs_client));fs_unlock();
 }
@@ -1133,6 +1170,9 @@ bool gui_monitor_client_matches(const char *host,uint16_t port){
            strcmp(g_client.host,host)==0 && g_client.port==port;
 }
 int gui_monitor_client_last_error(void){return atomic_load(&g_client.last_error);}
+uint32_t gui_monitor_client_status_dropouts(void){return atomic_load(&g_client.status_dropouts);}
+uint32_t gui_monitor_client_preview_dropouts(void){return atomic_load(&g_client.preview_dropouts);}
+bool gui_monitor_client_preview_error(void){return atomic_load(&g_client.preview_error);}
 
 
 void gui_monitor_server_poll_settings(gui_app_t *app){

@@ -48,6 +48,11 @@ bool gui_monitor_client_record_stats(gui_monitor_record_stats_t *out);
 void gui_monitor_client_reset_clips(int channel);
 /* 0=none/connecting, 1=unreachable, 2=legacy MISRC-M/1, 3=unknown response. */
 int gui_monitor_client_last_error(void);
+/* Per-session request error counters, independent of server capture errors.
+ * Established monitor sessions are retained through request dropouts. */
+uint32_t gui_monitor_client_status_dropouts(void);
+uint32_t gui_monitor_client_preview_dropouts(void);
+bool gui_monitor_client_preview_error(void);
 /* Read-only server filesystem navigation and server-owned Output folder.
  * Available only when connected via MISRC-M/2; no local path mixing. */
 void gui_monitor_client_browse_folders(const char *path, unsigned page);
