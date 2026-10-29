@@ -191,46 +191,74 @@ static int net_read_headers(net_sock_t fd, char *buf, size_t cap) {
 }
 
 /* -------------------------------------------------------------------------
- * Broadcast fanout: one producer (capture tap), N subscribers (/rf clients).
- * Chunks are refcounted; a chunk is freed once no subscriber references it.
+ * Broadcast fanout: bounded shared queue for /rf and /baseband subscribers.
+ *
+ * Queue nodes are owned by the fanout and all subscriber cursors are protected
+ * by f->mtx. A chunk is reclaimed as soon as every subscriber has advanced
+ * past it. Slow clients are disconnected rather than allowing an unlimited
+ * queue to exhaust the server's memory.
  * ------------------------------------------------------------------------- */
+
+#define NET_FANOUT_MAX_BYTES (64U * 1024U * 1024U)
 
 typedef struct net_chunk {
     size_t len;
-    int refcount;
     struct net_chunk *next;
     uint8_t data[];
 } net_chunk_t;
 
+typedef struct net_fanout_sub net_fanout_sub_t;
 typedef struct {
     net_mutex_t mtx;
     net_cond_t cond;
     net_chunk_t *head;
     net_chunk_t *tail;
+    net_fanout_sub_t *subs;
+    size_t queued_bytes;
+    size_t max_bytes;
     int subscribers;
     bool shutdown;
     bool initialized;
 } net_fanout_t;
 
-typedef struct {
+struct net_fanout_sub {
     net_fanout_t *f;
     net_chunk_t *cur;
     size_t off;
-} net_fanout_sub_t;
+    net_fanout_sub_t *next;
+    bool overflowed;
+};
 
 static void net_fanout_init(net_fanout_t *f) {
     memset(f, 0, sizeof(*f));
     net_mutex_init(&f->mtx);
     net_cond_init(&f->cond);
+    f->max_bytes = NET_FANOUT_MAX_BYTES;
     f->initialized = true;
 }
 
-static void net_fanout_free_chunk(net_chunk_t *c) {
-    /* Decrement refcount; free if zero. Caller may pass NULL. */
-    if (!c) return;
-    if (--c->refcount <= 0) {
-        free(c);
+/* Reclaim prefix no longer referenced by ANY subscriber. Must hold f->mtx. */
+static void net_fanout_trim_locked(net_fanout_t *f) {
+    while (f->head) {
+        bool in_use = false;
+        for (net_fanout_sub_t *s = f->subs; s; s = s->next) {
+            if (s->cur == f->head) { in_use = true; break; }
+        }
+        if (in_use) break;
+        net_chunk_t *done = f->head;
+        f->head = done->next;
+        f->queued_bytes -= done->len;
+        if (!f->head) f->tail = NULL;
+        free(done);
     }
+}
+
+static void net_fanout_shutdown(net_fanout_t *f) {
+    if (!f || !f->initialized) return;
+    net_mutex_lock(&f->mtx);
+    f->shutdown = true;
+    net_cond_broadcast(&f->cond);
+    net_mutex_unlock(&f->mtx);
 }
 
 static void net_fanout_destroy(net_fanout_t *f) {
@@ -238,15 +266,15 @@ static void net_fanout_destroy(net_fanout_t *f) {
     net_mutex_lock(&f->mtx);
     f->shutdown = true;
     net_cond_broadcast(&f->cond);
+    /* Caller must first ensure all subscriber workers have exited. */
     net_chunk_t *c = f->head;
     while (c) {
-        net_chunk_t *n = c->next;
-        /* Drop producer reference. Subscribers should already be gone. */
-        c->refcount = 0;
+        net_chunk_t *next = c->next;
         free(c);
-        c = n;
+        c = next;
     }
     f->head = f->tail = NULL;
+    f->queued_bytes = 0;
     net_mutex_unlock(&f->mtx);
     net_cond_destroy(&f->cond);
     net_mutex_destroy(&f->mtx);
@@ -254,15 +282,14 @@ static void net_fanout_destroy(net_fanout_t *f) {
 }
 
 static void net_fanout_subscribe(net_fanout_t *f, net_fanout_sub_t *s) {
-    s->f = f;
-    s->cur = NULL;
-    s->off = 0;
+    memset(s, 0, sizeof(*s));
     net_mutex_lock(&f->mtx);
-    f->subscribers++;
-    /* Start at head (oldest buffered) if any. */
-    if (f->head) {
-        s->cur = f->head;
-        s->cur->refcount++;
+    if (!f->shutdown) {
+        s->f = f;
+        s->next = f->subs;
+        f->subs = s;
+        f->subscribers++;
+        /* New clients start from FUTURE data, not an old cached stream. */
     }
     net_mutex_unlock(&f->mtx);
 }
@@ -271,101 +298,110 @@ static void net_fanout_unsubscribe(net_fanout_sub_t *s) {
     if (!s || !s->f) return;
     net_fanout_t *f = s->f;
     net_mutex_lock(&f->mtx);
-    if (f->subscribers > 0) f->subscribers--;
-    net_chunk_t *cur = s->cur;
-    s->cur = NULL;
-    s->off = 0;
-    net_mutex_unlock(&f->mtx);
-    net_fanout_free_chunk(cur);
+    net_fanout_sub_t **pp = &f->subs;
+    while (*pp && *pp != s) pp = &(*pp)->next;
+    if (*pp == s) {
+        *pp = s->next;
+        f->subscribers--;
+    }
     s->f = NULL;
+    s->cur = NULL;
+    s->next = NULL;
+    net_fanout_trim_locked(f);
+    net_mutex_unlock(&f->mtx);
 }
 
-/* Producer: append data. If there are no subscribers, drop it (no copy/alloc). */
 static void net_fanout_push(net_fanout_t *f, const void *data, size_t len) {
-    if (!f || !f->initialized || len == 0) return;
+    if (!f || !f->initialized || !data || len == 0) return;
     net_mutex_lock(&f->mtx);
-    if (f->shutdown || f->subscribers <= 0) {
+    if (f->shutdown || f->subscribers == 0) {
         net_mutex_unlock(&f->mtx);
         return;
     }
-    net_chunk_t *c = (net_chunk_t *)malloc(sizeof(net_chunk_t) + len);
-    if (!c) {
-        net_mutex_unlock(&f->mtx);
-        return;
+    /* An individual source chunk larger than the entire queue budget cannot
+     * be delivered without violating the bound. Drop slow subscriptions. */
+    net_chunk_t *c = NULL;
+    if (len <= f->max_bytes && len <= SIZE_MAX - sizeof(net_chunk_t)) {
+        c = (net_chunk_t *)malloc(sizeof(net_chunk_t) + len);
     }
-    c->len = len;
-    c->refcount = f->subscribers; /* each current subscriber will read it */
-    c->next = NULL;
-    memcpy(c->data, data, len);
-    if (f->tail) f->tail->next = c; else f->head = c;
-    f->tail = c;
+    if (c) {
+        c->len = len;
+        c->next = NULL;
+        memcpy(c->data, data, len);
+        if (f->tail) f->tail->next = c; else f->head = c;
+        f->tail = c;
+        f->queued_bytes += len;
+        for (net_fanout_sub_t *s = f->subs; s; s = s->next) {
+            if (!s->overflowed && !s->cur) s->cur = c;
+        }
+    } else {
+        for (net_fanout_sub_t *s = f->subs; s; s = s->next) {
+            s->overflowed = true;
+            s->cur = NULL;
+        }
+    }
+    /* Drop only the slowest subscriber(s) pinning the oldest chunk. */
+    net_fanout_trim_locked(f);
+    while (f->queued_bytes > f->max_bytes && f->head) {
+        bool dropped = false;
+        for (net_fanout_sub_t *s = f->subs; s; s = s->next) {
+            if (s->cur == f->head) {
+                s->overflowed = true;
+                s->cur = NULL;
+                dropped = true;
+            }
+        }
+        if (!dropped) break;
+        fprintf(stderr, "[NET] RF fanout: client too slow, dropping stream to bound server memory\n");
+        net_fanout_trim_locked(f);
+    }
     net_cond_broadcast(&f->cond);
     net_mutex_unlock(&f->mtx);
 }
 
-/* Subscriber: read up to cap bytes into dst. Blocks up to timeout_ms for data.
- * Returns bytes read (0 if timeout with no data), -1 on shutdown/EOF. */
+/* Returns bytes read; 0 on timeout; -1 on stop or queue overflow. */
 static ssize_t net_fanout_read(net_fanout_sub_t *s, void *dst, size_t cap, int timeout_ms) {
     if (!s || !s->f) return -1;
     net_fanout_t *f = s->f;
     size_t copied = 0;
     net_mutex_lock(&f->mtx);
     while (cap > 0) {
+        if (f->shutdown || s->overflowed) {
+            copied = 0;
+            break;
+        }
         if (s->cur && s->off >= s->cur->len) {
-            /* Advance to next chunk, release current. */
-            net_chunk_t *next = s->cur->next;
-            if (next) next->refcount++;
-            net_chunk_t *done = s->cur;
-            s->cur = next;
+            s->cur = s->cur->next;
             s->off = 0;
-            net_mutex_unlock(&f->mtx);
-            net_fanout_free_chunk(done);
-            net_mutex_lock(&f->mtx);
+            net_fanout_trim_locked(f);
             continue;
         }
         if (s->cur) {
             size_t avail = s->cur->len - s->off;
             size_t n = (avail < cap) ? avail : cap;
-            memcpy((char *)dst + copied, s->cur->data + s->off, n);
+            memcpy((uint8_t *)dst + copied, s->cur->data + s->off, n);
             s->off += n;
             copied += n;
             cap -= n;
             if (cap == 0) break;
             continue;
         }
-        /* No current chunk: wait for producer or shutdown. */
-        if (f->shutdown) {
-            break;
-        }
-        if (timeout_ms <= 0) {
-            break;
-        }
-        /* Wait with timeout. */
+        if (timeout_ms <= 0) break;
 #ifdef _WIN32
-        if (!SleepConditionVariableCS(&f->cond, &f->mtx, (unsigned long)timeout_ms)) {
-            break;
-        }
+        if (!SleepConditionVariableCS(&f->cond, &f->mtx, (DWORD)timeout_ms)) break;
 #else
         struct timespec ts;
         clock_gettime(CLOCK_REALTIME, &ts);
         ts.tv_sec += timeout_ms / 1000;
         ts.tv_nsec += (timeout_ms % 1000) * 1000000L;
         if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-        int rc = pthread_cond_timedwait(&f->cond, &f->mtx, &ts);
-        if (rc == ETIMEDOUT) {
-            timeout_ms = 0;
-            break;
-        }
+        if (pthread_cond_timedwait(&f->cond, &f->mtx, &ts) == ETIMEDOUT) break;
 #endif
-        /* Loop back: maybe a new chunk arrived or shutdown. */
-        if (!s->cur && f->head) {
-            s->cur = f->head;
-            s->cur->refcount++;
-        }
-        if (f->shutdown) break;
+        /* Re-check subscriber cursor, overflow and shutdown after wakeup. */
     }
+    bool failed = f->shutdown || s->overflowed;
     net_mutex_unlock(&f->mtx);
-    return (ssize_t)copied;
+    return failed ? -1 : (ssize_t)copied;
 }
 
 /* -------------------------------------------------------------------------
@@ -396,6 +432,7 @@ typedef struct {
     net_fanout_t audio;
     atomic_int rf_clients;
     atomic_int audio_clients;
+    atomic_int active_workers;  /* detached HTTP handlers: join via count before freeing server */
     /* UDP discovery beacon broadcaster. */
     thrd_t beacon_thread;
     atomic_bool beacon_stop;
@@ -912,34 +949,32 @@ static void server_handle_request(gui_app_t *app, net_sock_t fd, const char *met
     net_send_str(fd, "HTTP/1.0 404 Not Found\r\n\r\n");
 }
 
-/* Per-client thread: read one request, serve it, close. For /rf + /baseband
- * the serve loops until the client disconnects. */
+/* Per-client thread: read one request, serve it, close. For /rf and
+ * /baseband this thread lives until the client disconnects. */
+typedef struct {
+    gui_app_t *app;
+    net_sock_t fd;
+    net_server_t *srv;
+} net_server_client_ctx_t;
+
 static int server_client_thread(void *arg) {
-    typedef struct { gui_app_t *app; net_sock_t fd; } ctx_t;
-    ctx_t *c = (ctx_t *)arg;
+    net_server_client_ctx_t *c = (net_server_client_ctx_t *)arg;
     gui_app_t *app = c->app;
     net_sock_t fd = c->fd;
+    net_server_t *srv = c->srv;
     free(c);
 
-    /* Bound recv/send so a stuck/missing client cannot hold this (detached)
-     * thread forever on a blocking call. */
     net_set_timeouts(fd, 5000, 5000);
-
-    /* Monitor folder URLs can contain percent-escaped, 4096-byte UTF-8
-     * paths. Do not truncate them at the legacy 4 KiB HTTP header limit. */
     char buf[16384];
     int len = net_read_headers(fd, buf, sizeof(buf));
     if (len <= 0) {
         net_close(fd);
-        return 0;
+        goto done;
     }
-    /* Dispatch by requested protocol. Both clients connect to the same
-     * TCP port; monitor requests do not enter the legacy RF handler. */
     if (strncmp(buf, "GET /monitor/", 13) == 0) {
-        bool socket_transferred = gui_monitor_server_handle_request(
-            (uintptr_t)fd, app, buf);
+        bool socket_transferred = gui_monitor_server_handle_request((uintptr_t)fd, app, buf);
         if (!socket_transferred) net_close(fd);
-        return 0;
+        goto done;
     }
     char method[8] = {0};
     char uri[256] = {0};
@@ -947,10 +982,12 @@ static int server_client_thread(void *arg) {
     if (4 != sscanf(buf, "%7s %255s HTTP/%d.%d", method, uri, &v1, &v2)) {
         net_send_str(fd, "HTTP/1.0 400 Bad Request\r\n\r\n");
         net_close(fd);
-        return 0;
+        goto done;
     }
     server_handle_request(app, fd, method, uri);
     net_close(fd);
+done:
+    atomic_fetch_sub(&srv->active_workers, 1);
     return 0;
 }
 
@@ -981,13 +1018,15 @@ static int server_listen_thread(void *arg) {
             if (atomic_load(&srv->stop_flag)) break;
             continue;
         }
-        typedef struct { gui_app_t *app; net_sock_t fd; } ctx_t;
-        ctx_t *c = (ctx_t *)malloc(sizeof(ctx_t));
+        net_server_client_ctx_t *c = (net_server_client_ctx_t *)malloc(sizeof(*c));
         if (!c) { net_close(cfd); continue; }
         c->app = app;
         c->fd = cfd;
+        c->srv = srv;
+        atomic_fetch_add(&srv->active_workers, 1);
         thrd_t t;
         if (thrd_create(&t, server_client_thread, c) != thrd_success) {
+            atomic_fetch_sub(&srv->active_workers, 1);
             net_close(cfd);
             free(c);
             continue;
@@ -1042,6 +1081,7 @@ static int server_start(gui_app_t *app, uint16_t port) {
     atomic_store(&srv->stop_flag, false);
     atomic_store(&srv->rf_clients, 0);
     atomic_store(&srv->audio_clients, 0);
+    atomic_store(&srv->active_workers, 0);
     atomic_store(&srv->beacon_stop, false);
     net_fanout_init(&srv->rf);
     net_fanout_init(&srv->audio);
@@ -1093,6 +1133,9 @@ static void server_stop(net_server_t *srv) {
     atomic_store(&srv->stop_flag, true);
     atomic_store(&srv->running, false);
     atomic_store(&srv->beacon_stop, true);
+    /* Stop live /rf streams BEFORE freeing their shared queue. */
+    net_fanout_shutdown(&srv->rf);
+    net_fanout_shutdown(&srv->audio);
     if (net_sock_valid(srv->listen_fd)) {
         /* shutdown() wakes any blocking select()/accept() on this socket in
          * addition to the non-blocking loop, then close(). */
@@ -1106,7 +1149,11 @@ static void server_stop(net_server_t *srv) {
     }
     thrd_join(srv->listen_thread, NULL);
     thrd_join(srv->beacon_thread, NULL);
-    /* Wake any /rf + /baseband streaming subscribers so they exit. */
+    /* Accepted client threads are detached. Wait until all handlers have
+     * exited before destroying the queues or the server they reference. */
+    while (atomic_load(&srv->active_workers) != 0) {
+        thrd_sleep_ms(10);
+    }
     net_fanout_destroy(&srv->rf);
     net_fanout_destroy(&srv->audio);
     if (srv->app) {
