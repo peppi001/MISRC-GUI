@@ -1,0 +1,194 @@
+# Test-only workflow for peppi001's android-5cb3691-main-test branch.
+# Build one x86_64 APK, then install and launch the SAME APK on six Android emulators.
+# This does NOT claim to validate physical ARM64 hardware, USB devices, or remote-server use.
+name: Android 11-16 emulator compatibility TEST
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - android-5cb3691-main-test
+    paths:
+      - '.github/workflows/android-compat-matrix.yml'
+      - 'android/**'
+      - 'misrc_tools/**'
+      - 'third_party/**'
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-emulator-apk:
+    name: Build x86_64 Android test APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK tools and NDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          export ANDROID_HOME="$HOME/Android/Sdk"
+          mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/misrc-android-sdk
+          curl -fsSL --retry 3 -o /tmp/misrc-android-sdk/cmdtools.zip \
+            https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+          unzip -q /tmp/misrc-android-sdk/cmdtools.zip -d /tmp/misrc-android-sdk
+          mv /tmp/misrc-android-sdk/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest"
+          export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$PATH"
+          yes 2>/dev/null | sdkmanager --licenses >/dev/null || true
+          sdkmanager --install "platform-tools" "build-tools;34.0.0" "platforms;android-34" "ndk;25.2.9519653"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          echo "NDK_HOME=$ANDROID_HOME/ndk/25.2.9519653" >> "$GITHUB_ENV"
+          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+
+      - name: Build host dependencies
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cmake git make meson ninja-build nasm pkg-config curl zip unzip autoconf automake libtool
+
+      - name: Cross-build x86_64 Android libraries
+        env:
+          ANDROID_ABI: x86_64
+          JOBS: '4'
+        run: |
+          set -euxo pipefail
+          export DEPS_PREFIX="$PWD/.deps/install-android-x86_64"
+          export DEPS_SRC_DIR="$PWD/.deps/src-android-x86_64"
+          bash android/build-deps-android.sh
+
+      - name: Generate x86_64 Meson cross-file
+        env:
+          ANDROID_ABI: x86_64
+        run: |
+          set -euxo pipefail
+          export DEPS_PREFIX="$PWD/.deps/install-android-x86_64"
+          export ANDROID_CROSS_FILE="$PWD/.deps/x86_64-linux-android.ini"
+          bash android/gen-cross-file.sh
+
+      - name: Compile native GUI for Android x86_64
+        env:
+          ANDROID_ABI: x86_64
+        run: |
+          set -euxo pipefail
+          export DEPS_PREFIX="$PWD/.deps/install-android-x86_64"
+          export PKG_CONFIG="$PWD/android/android-pkg-config"
+          meson setup --cross-file .deps/x86_64-linux-android.ini -Dbuildtype=release \
+            build-android-emulator misrc_tools
+          meson compile -C build-android-emulator misrc_gui
+          test -s build-android-emulator/libmisrc_gui.so
+
+      - name: Package signed x86_64 test APK
+        env:
+          ANDROID_ABI: x86_64
+        run: |
+          set -euxo pipefail
+          export DEPS_PREFIX="$PWD/.deps/install-android-x86_64"
+          export BUILD_DIR="$PWD/build-android-emulator"
+          export OUT_DIR="$PWD/.ci-artifacts/android-emulator-apk"
+          bash android/build-apk.sh
+          APK="$(find "$OUT_DIR" -maxdepth 1 -name '*_x86_64.apk' -print -quit)"
+          test -s "$APK"
+          "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$APK"
+          unzip -l "$APK" | grep -q 'lib/x86_64/libmisrc_gui.so'
+          unzip -l "$APK" | grep -q 'lib/x86_64/libhsdaoh.so'
+          "$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -h \
+            build-android-emulator/libmisrc_gui.so | grep -q 'Machine:.*Advanced Micro Devices X86-64'
+          "$ANDROID_HOME/build-tools/34.0.0/aapt2" dump permissions "$APK" | tee /tmp/misrc-permissions.txt
+          grep -q 'android.permission.INTERNET' /tmp/misrc-permissions.txt
+          grep -q 'android.permission.ACCESS_NETWORK_STATE' /tmp/misrc-permissions.txt
+
+      - name: Upload emulator test APK
+        uses: actions/upload-artifact@v7
+        with:
+          name: misrc-android-x86_64-emulator-apk
+          path: .ci-artifacts/android-emulator-apk/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  emulator-smoke:
+    name: Android ${{ matrix.version }} / API ${{ matrix.api }}
+    needs: build-emulator-apk
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - version: '11'
+            api: 30
+          - version: '12'
+            api: 31
+          - version: '13'
+            api: 33
+          - version: '14'
+            api: 34
+          - version: '15'
+            api: 35
+          - version: '16'
+            api: 36
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download test APK
+        uses: actions/download-artifact@v8
+        with:
+          name: misrc-android-x86_64-emulator-apk
+          path: .ci-artifacts/android-emulator-apk
+
+      - name: Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configure KVM permissions
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -r /dev/kvm && test -w /dev/kvm
+
+      - name: Boot Android emulator and smoke-test MISRC GUI
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          EXPECTED_API: ${{ matrix.api }}
+          TEST_LOG_DIR: ${{ github.workspace }}/.ci-artifacts/emulator-logs
+        with:
+          api-level: ${{ matrix.api }}
+          target: google_apis
+          arch: x86_64
+          profile: pixel_5
+          cores: 2
+          ram-size: 3072M
+          disable-animations: true
+          emulator-boot-timeout: 600
+          emulator-options: -no-window -noaudio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-save -no-snapshot-load -camera-back none -camera-front none
+          script: bash android/emulator-smoke-test.sh
+
+      - name: Preserve emulator logs even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: misrc-emulator-api-${{ matrix.api }}-logs
+          path: .ci-artifacts/emulator-logs/
+          if-no-files-found: warn
+          retention-days: 14
