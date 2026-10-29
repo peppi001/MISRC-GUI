@@ -160,12 +160,34 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configure KVM permissions
+      # Avoid fragile udev reload/trigger commands: the runner may already have
+      # working KVM, or it may lack /dev/kvm altogether. Record which case occurred.
+      - name: Detect KVM and save runner diagnostics
+        id: kvm
+        shell: bash
         run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-          test -r /dev/kvm && test -w /dev/kvm
+          set -euo pipefail
+          mkdir -p .ci-artifacts/emulator-logs
+          {
+            echo "Runner: ${RUNNER_OS} / $(uname -r)"
+            echo "User: $(id)"
+            if [ -e /dev/kvm ]; then
+              ls -l /dev/kvm
+              if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+                echo "Attempting direct KVM permission fix"
+                if ! sudo chmod a+rw /dev/kvm; then
+                  echo "::warning::Unable to change /dev/kvm permissions"
+                fi
+              fi
+            fi
+            if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+              echo "disable_hw_accel=false" >> "$GITHUB_OUTPUT"
+              echo "KVM available; running hardware-accelerated emulator"
+            else
+              echo "disable_hw_accel=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::KVM unavailable or inaccessible; trying software emulation"
+            fi
+          } 2>&1 | tee .ci-artifacts/emulator-logs/kvm-diagnostics.txt
 
       - name: Boot Android emulator and smoke-test MISRC GUI
         uses: reactivecircus/android-emulator-runner@v2
@@ -180,7 +202,8 @@ jobs:
           cores: 2
           ram-size: 3072M
           disable-animations: true
-          emulator-boot-timeout: 600
+          disable-linux-hw-accel: ${{ steps.kvm.outputs.disable_hw_accel }}
+          emulator-boot-timeout: 900
           emulator-options: -no-window -noaudio -no-boot-anim -gpu swiftshader_indirect -no-snapshot-save -no-snapshot-load -camera-back none -camera-front none
           script: bash android/emulator-smoke-test.sh
 
