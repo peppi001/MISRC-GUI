@@ -6714,14 +6714,14 @@ static void render_channel_stats(gui_app_t *app, int channel,
                         detail->dropped_blocks = atomic_load(&bstats.write_drops);
                     }
                 }
-                const char *buffer_health = "Buffer details";
+                const char *buffer_health = "Buffer info";
                 Color buffer_health_color = COLOR_TEXT_DIM;
                 if (detail->buffer_known) {
                     if (detail->dropped_blocks > 0) {
-                        buffer_health = "Dropped blocks!";
+                        buffer_health = "Data lost!";
                         buffer_health_color = COLOR_CLIP_RED;
                     } else if (detail->buffer_fill_pct >= 75 || detail->write_waits > 0) {
-                        buffer_health = "Buffer warning";
+                        buffer_health = "Buffer high";
                         buffer_health_color = COLOR_METER_YELLOW;
                     } else {
                         buffer_health = "Buffer OK";
@@ -6808,18 +6808,20 @@ static void render_channel_stats(gui_app_t *app, int channel,
                         .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(24) },
                         .layoutDirection = CLAY_LEFT_TO_RIGHT,
                         .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
-                        .childGap = 6,
+                        .childGap = 4,
                         .padding = { 4, 4, 0, 0 }
                     },
                     .backgroundColor = to_clay_color(COLOR_BUTTON),
                     .cornerRadius = CLAY_CORNER_RADIUS(3)
                 }) {
+                    // Use the same size/font as the Split and Waveform controls.
+                    // Keep warning labels short so both captions fit this narrow button.
                     CLAY_TEXT(make_string(buffer_health), CLAY_TEXT_CONFIG({
-                        .fontSize = 13, .fontId = 0,
+                        .fontSize = FONT_SIZE_DROPDOWN_OPT, .fontId = 0,
                         .textColor = to_clay_color(buffer_health_color),
                         .wrapMode = CLAY_TEXT_WRAP_NONE }));
                     CLAY_TEXT(CLAY_STRING("Details >"), CLAY_TEXT_CONFIG({
-                        .fontSize = 12, .fontId = 0,
+                        .fontSize = FONT_SIZE_DROPDOWN_OPT, .fontId = 0,
                         .textColor = to_clay_color(COLOR_TEXT),
                         .wrapMode = CLAY_TEXT_WRAP_NONE }));
                 }
@@ -7690,6 +7692,9 @@ static bool render_main_panels(gui_app_t *app) {
     int status_right_gap = status_tiny ? 8 : 10;
     int status_left_gap = status_tiny ? 4 : 8;
     int status_font_size = FONT_SIZE_STATUS;
+    // Inter is clearer than the small Space Mono glyphs in the status bar.
+    // Use the same font for measuring, truncating and rendering readouts.
+    const int status_readout_font_id = 0;
     int device_buffer_tier_width[3] = { 0, 0, 0 };
     int device_buffer_caption_width[3] = { 0, 0, 0 };
     const char *device_buffer_caption_budget[3] = {
@@ -7701,7 +7706,7 @@ static bool render_main_panels(gui_app_t *app) {
             bool full = tier == GUI_DEVICE_BUFFER_LAYOUT_FULL;
             int inner_gap = tier == GUI_DEVICE_BUFFER_LAYOUT_TINY ? 2 : 4;
             device_buffer_caption_width[tier] = gui_ui_measure_text_width(
-                app, device_buffer_caption_budget[tier], status_font_size, 1);
+                app, device_buffer_caption_budget[tier], status_font_size, status_readout_font_id);
             device_buffer_tier_width[tier] = gui_ui_measure_text_width(
                 app, full ? "HW Buffer:" : "HW:", status_font_size, 0) +
                 device_buffer_caption_width[tier] + inner_gap;
@@ -7848,7 +7853,7 @@ static bool render_main_panels(gui_app_t *app) {
     if (show_free_space) {
         for (int tier = 0; tier < 3; tier++) {
             status_free_space_tier_width[tier] = gui_ui_measure_text_width(
-                app, free_space_budget[tier], status_font_size, 1);
+                app, free_space_budget[tier], status_font_size, status_readout_font_id);
         }
     }
 
@@ -7876,12 +7881,12 @@ static bool render_main_panels(gui_app_t *app) {
                      tier < 2 ? "-- MSPS" : "--");
         }
         status_sample_rate_tier_width[tier] = gui_ui_measure_text_width(
-            app, sample_rate_budget[tier], status_font_size, 1);
+            app, sample_rate_budget[tier], status_font_size, status_readout_font_id);
         format_status_samples_tier(status_samples_tier_text[tier],
                                    sizeof(status_samples_tier_text[tier]),
                                    status_samples_raw, tier);
         status_samples_tier_width[tier] = gui_ui_measure_text_width(
-            app, samples_budget[tier], status_font_size, 1);
+            app, samples_budget[tier], status_font_size, status_readout_font_id);
     }
 
     int status_rf_pct = 0;
@@ -7894,7 +7899,7 @@ static bool render_main_panels(gui_app_t *app) {
     int fault_caption_width[4] = { 0, 0, 0, 0 };
     for (int i = 1; i < 4; i++) {
         fault_caption_width[i] = gui_ui_measure_text_width(
-            app, fault_captions[i], status_font_size, 1);
+            app, fault_captions[i], status_font_size, status_readout_font_id);
     }
     bool show_fault_summary = false;
     int fault_summary_flags = 0;
@@ -7942,12 +7947,12 @@ static bool render_main_panels(gui_app_t *app) {
     int rf_label_width_compact = gui_ui_measure_text_width(app, rf_buffer_label_compact, status_font_size, 0);
     int audio_label_width_compact = gui_ui_measure_text_width(app, audio_buffer_label_compact, status_font_size, 0);
     int record_timer_text_width = show_record_indicator
-        ? gui_ui_measure_text_width(app, "99:59:59", status_font_size, 1)
+        ? gui_ui_measure_text_width(app, "88:88:88", status_font_size, status_readout_font_id)
         : 0;
-    int frames_text_width = gui_ui_measure_text_width(app, "999M", status_font_size, 1);
+    int frames_text_width = gui_ui_measure_text_width(app, "999M", status_font_size, status_readout_font_id);
     int missed_text_width = frames_text_width;
     int errors_text_width = frames_text_width;
-    int rf_text_width = gui_ui_measure_text_width(app, "100%", status_font_size, 1);
+    int rf_text_width = gui_ui_measure_text_width(app, "100%", status_font_size, status_readout_font_id);
     int aud_text_width = rf_text_width;
     int free_space_text_width = status_free_space_tier_width[status_free_space_tier];
     int free_space_width_budget = free_space_text_width;
@@ -8240,7 +8245,7 @@ static bool render_main_panels(gui_app_t *app) {
     if (show_device_buffer_status) {
         status_device_buffer_view = device_buffer_views[device_buffer_level];
         gui_ui_ellipsize_text(app, status_device_buffer_view.caption,
-            sizeof(status_device_buffer_view.caption), status_font_size, 1,
+            sizeof(status_device_buffer_view.caption), status_font_size, status_readout_font_id,
             device_buffer_caption_width[device_buffer_level]);
     }
     gui_device_buffer_layout_t device_buffer_layout =
@@ -8278,20 +8283,20 @@ static bool render_main_panels(gui_app_t *app) {
     if (show_free_space && free_space_width_budget > 0) {
         gui_ui_ellipsize_text(app, status_free_space_display,
                               sizeof(status_free_space_display),
-                              status_font_size, 1, free_space_width_budget);
+                              status_font_size, status_readout_font_id, free_space_width_budget);
     }
     gui_ui_ellipsize_text(app, status_sample_rate_display, sizeof(status_sample_rate_display),
-                          status_font_size, 1, sample_rate_value_width);
+                          status_font_size, status_readout_font_id, sample_rate_value_width);
     gui_ui_ellipsize_text(app, status_samples_display, sizeof(status_samples_display),
-                          status_font_size, 1, samples_value_width);
+                          status_font_size, status_readout_font_id, samples_value_width);
     gui_ui_ellipsize_text(app, status_rf_buf_display, sizeof(status_rf_buf_display),
-                          status_font_size, 1, buffer_value_width);
+                          status_font_size, status_readout_font_id, buffer_value_width);
     gui_ui_ellipsize_text(app, status_aud_buf_display, sizeof(status_aud_buf_display),
-                          status_font_size, 1, buffer_value_width);
+                          status_font_size, status_readout_font_id, buffer_value_width);
     if (show_record_indicator) {
         gui_ui_ellipsize_text(app, status_record_timer_display,
                               sizeof(status_record_timer_display),
-                              status_font_size, 1, record_timer_text_width);
+                              status_font_size, status_readout_font_id, record_timer_text_width);
     }
     // DdD aliases begin only when the entire sample-rate readout is hidden.
     // Pass the same-frame choice to the toolbar and return it for its dropdown;
@@ -8347,7 +8352,7 @@ static bool render_main_panels(gui_app_t *app) {
                     .layout = { .sizing = { CLAY_SIZING_FIXED(record_timer_text_width), CLAY_SIZING_FIT(0) } }
                 }) {
                     CLAY_TEXT(make_string(status_record_timer_display),
-                        CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                        CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                 }
             }
 
@@ -8372,7 +8377,7 @@ static bool render_main_panels(gui_app_t *app) {
                     }
                 }) {
                     CLAY_TEXT(make_string(status_free_space_display),
-                        CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(free_space_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                        CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(free_space_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                 }
             }
         }
@@ -8421,7 +8426,7 @@ static bool render_main_panels(gui_app_t *app) {
                         .layout = { .sizing = { CLAY_SIZING_FIXED(sample_rate_value_width), CLAY_SIZING_FIT(0) } }
                     }) {
                         CLAY_TEXT(make_string(status_sample_rate_display),
-                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT_DIM), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(COLOR_TEXT_DIM), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                     }
                 }
                 if (show_samples_count) {
@@ -8439,7 +8444,7 @@ static bool render_main_panels(gui_app_t *app) {
                             .layout = { .sizing = { CLAY_SIZING_FIXED(samples_value_width), CLAY_SIZING_FIT(0) } }
                         }) {
                             CLAY_TEXT(make_string(status_samples_display),
-                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                         }
                     }
                     if (show_frame_count) {
@@ -8456,7 +8461,7 @@ static bool render_main_panels(gui_app_t *app) {
                                 .layout = { .sizing = { CLAY_SIZING_FIXED(frames_value_width), CLAY_SIZING_FIT(0) } }
                             }) {
                                 CLAY_TEXT(make_string(status_frames_display),
-                                    CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                    CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                             }
                         }
                     }
@@ -8476,7 +8481,7 @@ static bool render_main_panels(gui_app_t *app) {
                             .layout = { .sizing = { CLAY_SIZING_FIXED(small_counter_width), CLAY_SIZING_FIT(0) } }
                         }) {
                             CLAY_TEXT(make_string(status_missed_display),
-                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(missed > 0 ? COLOR_CLIP_RED : COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(missed > 0 ? COLOR_CLIP_RED : COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                         }
                     }
                 }
@@ -8495,7 +8500,7 @@ static bool render_main_panels(gui_app_t *app) {
                             .layout = { .sizing = { CLAY_SIZING_FIXED(small_counter_width), CLAY_SIZING_FIT(0) } }
                         }) {
                             CLAY_TEXT(make_string(status_errors_display),
-                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(errors > 0 ? COLOR_CLIP_RED : COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(errors > 0 ? COLOR_CLIP_RED : COLOR_TEXT), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                         }
                     }
                 }
@@ -8508,7 +8513,7 @@ static bool render_main_panels(gui_app_t *app) {
                                 ? COLOR_BUTTON_HOVER : COLOR_TOOLBAR_BG)
                     }) {
                         CLAY_TEXT(make_string(fault_captions[fault_summary_flags]),
-                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1,
+                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id,
                                 .textColor = to_clay_color(COLOR_CLIP_RED), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                     }
                 }
@@ -8576,7 +8581,7 @@ static bool render_main_panels(gui_app_t *app) {
                             .layout = { .sizing = { CLAY_SIZING_FIXED(device_buffer_caption_width[device_buffer_level]), CLAY_SIZING_FIT(0) } }
                         }) {
                             CLAY_TEXT(make_string(status_device_buffer_view.caption),
-                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(device_buffer_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                                CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(device_buffer_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                         }
                     }
                 }
@@ -8597,7 +8602,7 @@ static bool render_main_panels(gui_app_t *app) {
                     }) {
                         Color rf_color = (rf_pct > 90) ? COLOR_CLIP_RED : (rf_pct > 75) ? COLOR_METER_YELLOW : COLOR_TEXT;
                         CLAY_TEXT(make_string(status_rf_buf_display),
-                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(rf_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(rf_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                     }
                 }
 
@@ -8617,7 +8622,7 @@ static bool render_main_panels(gui_app_t *app) {
                     }) {
                         Color aud_color = (aud_pct > 90) ? COLOR_CLIP_RED : (aud_pct > 75) ? COLOR_METER_YELLOW : COLOR_TEXT;
                         CLAY_TEXT(make_string(status_aud_buf_display),
-                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = 1, .textColor = to_clay_color(aud_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
+                            CLAY_TEXT_CONFIG({ .fontSize = status_font_size, .fontId = status_readout_font_id, .textColor = to_clay_color(aud_color), .wrapMode = CLAY_TEXT_WRAP_NONE }));
                     }
                 }
             }
