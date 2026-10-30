@@ -371,7 +371,7 @@ void gui_monitor_client_sync_main(gui_app_t *app){
         }
         atomic_flag_clear_explicit(&g_record_ui_lock,memory_order_release);
         if(message[0]){
-            gui_app_set_status(app,message);
+            gui_app_set_status(app,"Recording failed. Check settings!");
             gui_popup_info("Remote recording failed",message);
         }
     }
