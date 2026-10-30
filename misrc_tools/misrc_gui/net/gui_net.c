@@ -2308,8 +2308,17 @@ void gui_net_poll_commands(gui_app_t *app) {
             bool local = monitor_record == 2;
             fprintf(stderr, "[M-SERVER] executing /monitor/record on (local=%d)\n", local);
             if (!local || gui_monitor_local_save_begin() == 0) {
-                if (gui_app_start_recording(app) != 0 && local)
-                    (void)gui_monitor_local_save_end(false);
+                int record_rc = gui_app_start_recording(app);
+                if (record_rc == 0) {
+                    fprintf(stderr, "[M-SERVER] recording started (local=%d)\n", local);
+                } else {
+                    fprintf(stderr,
+                            "[M-SERVER] recording did NOT start: rc=%d (%s), output_path='%s', reason='%s'\n",
+                            record_rc, record_rc == 1 ? "awaiting overwrite confirmation" : "error",
+                            app->settings.output_path,
+                            app->status_message[0] ? app->status_message : "no status provided");
+                    if (local) (void)gui_monitor_local_save_end(false);
+                }
             } else {
                 gui_app_set_status(app, "Local Save rejected: receiver unavailable");
                 fprintf(stderr, "[M-LOCAL] Record rejected: receiver unavailable\n");
@@ -2318,7 +2327,13 @@ void gui_net_poll_commands(gui_app_t *app) {
         if (atomic_exchange(&app->net_cmd_record_on, false)) {
             if (app->is_capturing && !app->is_recording) {
                 fprintf(stderr, "[NET] server: executing /record on\n");
-                (void)gui_app_start_recording(app); /* legacy always records to server */
+                int record_rc = gui_app_start_recording(app); /* legacy always records to server */
+                if (record_rc != 0)
+                    fprintf(stderr,
+                            "[NET] server: /record on did NOT start: rc=%d (%s), output_path='%s', reason='%s'\n",
+                            record_rc, record_rc == 1 ? "awaiting overwrite confirmation" : "error",
+                            app->settings.output_path,
+                            app->status_message[0] ? app->status_message : "no status provided");
             }
         }
         if (atomic_exchange(&app->net_cmd_record_off, false)) {
