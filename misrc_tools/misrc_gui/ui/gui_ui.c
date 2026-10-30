@@ -6729,13 +6729,13 @@ static void render_channel_stats(gui_app_t *app, int channel,
                     }
                 }
 
-                // The indicator/title and elapsed time are separate so the
-                // clock is readable at 16px without enlarging the sidebar.
+                // Keep recording state and duration together in the narrow
+                // sidebar. Use a short inactive label so the 18px clock fits.
                 CLAY(CLAY_IDI("RecordingStateRow", channel), {
                     .layout = {
                         .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
                         .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                        .childGap = 5,
+                        .childGap = 4,
                         .childAlignment = { .y = CLAY_ALIGN_Y_CENTER }
                     }
                 }) {
@@ -6744,14 +6744,12 @@ static void render_channel_stats(gui_app_t *app, int channel,
                         .backgroundColor = to_clay_color(detail->recording ? COLOR_SYNC_GREEN : COLOR_TEXT_DIM),
                         .cornerRadius = CLAY_CORNER_RADIUS(8)
                     }) {}
-                    CLAY_TEXT(detail->recording ? CLAY_STRING("Recording") : CLAY_STRING("Last recording"),
-                        CLAY_TEXT_CONFIG({ .fontSize = 14, .fontId = 0,
+                    CLAY_TEXT(detail->recording ? CLAY_STRING("Recording") : CLAY_STRING("Last rec"),
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0,
                             .textColor = to_clay_color(COLOR_TEXT_DIM),
                             .wrapMode = CLAY_TEXT_WRAP_NONE }));
-                }
-                CLAY(CLAY_IDI("RecDurationRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                     CLAY_TEXT(make_string(buf_rec_duration + 5),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0,
+                        CLAY_TEXT_CONFIG({ .fontSize = 18, .fontId = 0,
                             .wrapMode = CLAY_TEXT_WRAP_NONE,
                             .textColor = to_clay_color(COLOR_TEXT) }));
                 }
@@ -7550,9 +7548,15 @@ static void render_channels_panel(gui_app_t *app, gui_ui_channel_spacing_t spaci
 static bool render_main_panels(gui_app_t *app) {
     int status_width = gui_ui_get_layout_width();
     int status_height = gui_ui_get_layout_height();
+    // Remote recording occupies the same status-bar space as local recording.
+    // Determine it before deciding which status layout/message to display.
+    gui_monitor_record_stats_t m_status = {0};
+    bool m_status_valid = app->settings.net_mode == GUI_NET_MODE_MONITOR_CLIENT &&
+        gui_monitor_client_record_stats(&m_status);
+    bool m_recording = m_status_valid && gui_monitor_client_peer_state() == 2;
     gui_ui_status_layout_mode_t status_layout =
         gui_ui_get_status_layout_mode(status_width, status_height,
-                                      app->is_recording);
+                                      app->is_recording || m_recording);
     bool status_quarter_scale =
         status_width <= GUI_UI_STATUS_QUARTER_MAX_WIDTH &&
         status_height <= GUI_UI_STATUS_QUARTER_MAX_HEIGHT;
@@ -7671,8 +7675,11 @@ static bool render_main_panels(gui_app_t *app) {
     // Decide error rows below, once the complete message and fixed readout
     // widths are known. Normal recording status is redundant with the timer.
     bool status_two_rows = false;
+    // An acknowledged remote recording supersedes the stale "start recording
+    // requested" message, just as an active local recording does. Keep
+    // transport warnings and real errors visible in either mode.
     bool show_status_message = rf_transport_banner || status_is_error ||
-        (!status_minimal && !app->is_recording);
+        (!status_minimal && !app->is_recording && !m_recording);
     /* Keep free-space visible by default and let the dynamic budget contract
      * gaps/widths first; only hide it as a last resort. Error status still
      * reserves the left-side for readable failure text. */
@@ -7736,10 +7743,6 @@ static bool render_main_panels(gui_app_t *app) {
     const char *errors_label = status_compact_labels ? errors_label_compact : errors_label_full;
     update_status_free_space(app);
 
-    gui_monitor_record_stats_t m_status={0};
-    bool m_status_valid=app->settings.net_mode==GUI_NET_MODE_MONITOR_CLIENT &&
-        gui_monitor_client_record_stats(&m_status);
-    bool m_recording=m_status_valid && gui_monitor_client_peer_state()==2;
     bool show_record_indicator = (app->is_recording || m_recording) && !status_quarter_scale;
     if (show_record_indicator) {
         double rec_duration = m_recording ? (double)m_status.elapsed_ms/1000.0
@@ -7946,9 +7949,26 @@ static bool render_main_panels(gui_app_t *app) {
     int errors_label_width_compact = gui_ui_measure_text_width(app, errors_label_compact, status_font_size, 0);
     int rf_label_width_compact = gui_ui_measure_text_width(app, rf_buffer_label_compact, status_font_size, 0);
     int audio_label_width_compact = gui_ui_measure_text_width(app, audio_buffer_label_compact, status_font_size, 0);
-    int record_timer_text_width = show_record_indicator
-        ? gui_ui_measure_text_width(app, "88:88:88", status_font_size, status_readout_font_id)
-        : 0;
+    int record_timer_text_width = 0;
+    if (show_record_indicator) {
+        // Inter has proportional digits: measuring "88:88:88" can be narrower
+        // than the actual "00:00:42", causing the elapsed timer to be
+        // ellipsized and appear to collide with the adjacent status message.
+        // Reserve the widest six-digit clock, not a single digit pattern.
+        char timer_probe[] = "00:00:00";
+        for (char digit = '0'; digit <= '9'; digit++) {
+            timer_probe[0] = timer_probe[1] = timer_probe[3] =
+                timer_probe[4] = timer_probe[6] = timer_probe[7] = digit;
+            int width = gui_ui_measure_text_width(app, timer_probe,
+                status_font_size, status_readout_font_id);
+            if (width > record_timer_text_width) record_timer_text_width = width;
+        }
+        // Account for three-digit hour counts and renderer rounding.
+        int live_width = gui_ui_measure_text_width(app, status_record_timer_display,
+            status_font_size, status_readout_font_id);
+        if (live_width > record_timer_text_width) record_timer_text_width = live_width;
+        record_timer_text_width += 8;
+    }
     int frames_text_width = gui_ui_measure_text_width(app, "999M", status_font_size, status_readout_font_id);
     int missed_text_width = frames_text_width;
     int errors_text_width = frames_text_width;
