@@ -6346,6 +6346,8 @@ static void render_toolbar(gui_app_t *app, bool ddd_compact_labels) {
 
 // Fixed width for labels to ensure alignment
 #define LABEL_WIDTH 50
+// Keep recording details compact; Peak/Clip retain their 16px size.
+#define FONT_SIZE_RECORD_READOUT 14
 
 typedef struct {
     uint32_t clip_pos, clip_neg;
@@ -6667,38 +6669,62 @@ static void render_channel_stats(gui_app_t *app, int channel,
                 }
                 CLAY(CLAY_IDI("RecDurationRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                     CLAY_TEXT(make_string(buf_rec_duration),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                 }
                 if (!quarter_scale_layout) {
                     CLAY(CLAY_IDI("RecRawRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                         CLAY_TEXT(make_string(buf_rec_raw),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                     }
                 }
                 if (buf_rec_flac[0]) {
                     CLAY(CLAY_IDI("RecFlacRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                         CLAY_TEXT(make_string(buf_rec_flac),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                     }
                 }
                 if (buf_rec_ratio[0]) {
                     CLAY(CLAY_IDI("RecRatioRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                         CLAY_TEXT(make_string(buf_rec_ratio),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                     }
                 }
                 if (m_record) {
-                    /* Live remote record buffer and safety counters, with
-                     * persistent bounded strings (Clay uses frame pointers). */
-                    static char m_rec_buffers[2][88];
-                    snprintf(m_rec_buffers[channel],sizeof(m_rec_buffers[channel]),
-                        "REC_%c: %u%%  W:%u D:%u",
-                        channel?'B':'A',m_record->rec_fill_pct[channel],
-                        m_record->rec_waits[channel],m_record->rec_drops[channel]);
-                    CLAY(CLAY_IDI("MClientRecordBuffer",channel),{.layout=STAT_ROW_LAYOUT}){
-                        CLAY_TEXT(make_string(m_rec_buffers[channel]),
-                            CLAY_TEXT_CONFIG({.fontSize = FONT_SIZE_STATS, .fontId = 0,
-                                .textColor=to_clay_color(m_record->rec_fill_pct[channel]>=80?COLOR_CLIP_RED:channel_value_color)}));
+                    /* Explain record-buffer health in full words, without a
+                     * long single-line W/D abbreviation. Clay retains frame
+                     * pointers, so all three strings have persistent storage. */
+                    static char m_rec_buffers[2][3][64];
+                    char waits_count[16];
+                    char drops_count[16];
+                    format_status_counter(waits_count, sizeof(waits_count), m_record->rec_waits[channel]);
+                    format_status_counter(drops_count, sizeof(drops_count), m_record->rec_drops[channel]);
+                    snprintf(m_rec_buffers[channel][0], sizeof(m_rec_buffers[channel][0]),
+                             "Record buffer %c: %u%%", channel ? 'B' : 'A',
+                             m_record->rec_fill_pct[channel]);
+                    snprintf(m_rec_buffers[channel][1], sizeof(m_rec_buffers[channel][1]),
+                             "Write waits: %s", waits_count);
+                    snprintf(m_rec_buffers[channel][2], sizeof(m_rec_buffers[channel][2]),
+                             "Dropped blocks: %s", drops_count);
+                    CLAY(CLAY_IDI("MClientRecordBuffer", channel), { .layout = STAT_ROW_LAYOUT }) {
+                        CLAY_TEXT(make_string(m_rec_buffers[channel][0]), CLAY_TEXT_CONFIG({
+                            .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0,
+                            .wrapMode = CLAY_TEXT_WRAP_NONE,
+                            .textColor = to_clay_color(m_record->rec_fill_pct[channel] >= 80 ? COLOR_CLIP_RED : channel_value_color)
+                        }));
+                    }
+                    CLAY(CLAY_IDI("MClientRecordWaits", channel), { .layout = STAT_ROW_LAYOUT }) {
+                        CLAY_TEXT(make_string(m_rec_buffers[channel][1]), CLAY_TEXT_CONFIG({
+                            .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0,
+                            .wrapMode = CLAY_TEXT_WRAP_NONE,
+                            .textColor = to_clay_color(channel_value_color)
+                        }));
+                    }
+                    CLAY(CLAY_IDI("MClientRecordDrops", channel), { .layout = STAT_ROW_LAYOUT }) {
+                        CLAY_TEXT(make_string(m_rec_buffers[channel][2]), CLAY_TEXT_CONFIG({
+                            .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0,
+                            .wrapMode = CLAY_TEXT_WRAP_NONE,
+                            .textColor = to_clay_color(m_record->rec_drops[channel] > 0 ? COLOR_CLIP_RED : channel_value_color)
+                        }));
                     }
                     if (channel==0 && m_record->local_save) {
                         static char m_send_buffer[96];
@@ -6709,7 +6735,7 @@ static void render_channel_stats(gui_app_t *app, int channel,
                             percent,(double)m_record->send_queue_bytes/1048576.0);
                         CLAY(CLAY_ID("MClientLocalSendBuffer"),{.layout=STAT_ROW_LAYOUT}){
                             CLAY_TEXT(make_string(m_send_buffer),
-                                CLAY_TEXT_CONFIG({.fontSize=FONT_SIZE_STATS,.fontId=0,
+                                CLAY_TEXT_CONFIG({.fontSize=FONT_SIZE_RECORD_READOUT,.fontId=0,
                                     .textColor=to_clay_color(percent>=80?COLOR_CLIP_RED:channel_value_color)}));
                         }
                     }
