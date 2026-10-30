@@ -1079,7 +1079,7 @@ static int mon_client_thread(void *ctx){
                      * Retain the last complete frame and expose its staleness. */
                     if(gui_monitor_session_preview_failed(&session)){
                         fprintf(stderr,"[M-CLIENT] Preview request failed; last valid frame retained\n");
-                        gui_app_set_status(g_client.app,"Monitor preview error: showing last valid frame");
+                        /* The UI reads g_client.preview_error for the live warning. */
                     }
                 }else if(gui_monitor_session_preview_ok(&session)){
                     fprintf(stderr,"[M-CLIENT] Preview stream recovered\n");
