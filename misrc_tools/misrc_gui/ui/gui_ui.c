@@ -31,6 +31,7 @@
 #include "../output/gui_record.h"
 #include "../input/gui_capture.h" // Support hsdoah-rp2350 Error & stats
 #include "../net/gui_net.h"
+#include "../net/gui_net_queue_limits.h"
 #include "../net/gui_monitor_transport.h"
 #include "../core/gui_updater.h" // Manifest-driven updater: releases page + auto-patch manifest + confirmed self-update
 #include "version.h"
@@ -5056,11 +5057,16 @@ static void render_version_info_window(gui_app_t *app)
             if (app->settings.net_mode == GUI_NET_MODE_SERVER) {
                 rf_transport_warning = atomic_load(&app->net_rf_server_stream_drops) > 0 ||
                     atomic_load(&app->net_audio_server_stream_drops) > 0 ||
-                    atomic_load(&app->net_rf_server_queue_bytes) >= 48U * 1024U * 1024U ||
-                    atomic_load(&app->net_audio_server_queue_bytes) >= 48U * 1024U * 1024U;
+                    atomic_load(&app->net_rf_server_queue_bytes) >=
+                        gui_net_queue_warn_bytes(GUI_NET_RF_QUEUE_LIMIT_BYTES) ||
+                    atomic_load(&app->net_audio_server_queue_bytes) >=
+                        gui_net_queue_warn_bytes(GUI_NET_AUDIO_QUEUE_LIMIT_BYTES);
             } else if (app->settings.net_mode == GUI_NET_MODE_CLIENT) {
                 rf_transport_warning = atomic_load(&app->net_rf_client_interruptions) > 0 ||
-                    atomic_load(&app->net_audio_client_interruptions) > 0;
+                    atomic_load(&app->net_audio_client_interruptions) > 0 ||
+                    atomic_load(&app->net_rf_server_stream_drops) > 0 ||
+                    atomic_load(&app->net_rf_server_queue_bytes) >=
+                        gui_net_queue_warn_bytes(GUI_NET_RF_QUEUE_LIMIT_BYTES);
             }
             Color net_status_color = rf_transport_warning
                 ? (Color){255, 170, 80, 255} : COLOR_TEXT;
@@ -7480,9 +7486,9 @@ static bool render_main_panels(gui_app_t *app) {
             strstr(raw_status_gate, "timed out") != NULL ||
             strstr(raw_status_gate, "Capture stopped:") != NULL;
     }
-    /* A separate network warning in the status bar: never overwrite the
-     * capture/device status_message or mask a more urgent existing error.
-     * 'Stream interrupted' does not prove the physical LAN is too slow. */
+    /* Network backpressure is distinct from USB/capture buffer errors.
+     * Server-reported RF queue overflow proves that the transfer path cannot
+     * sustain source rate, but not whether NIC/Wi-Fi or client CPU is to blame. */
     bool rf_transport_banner = false;
     bool rf_transport_critical = false;
     static char rf_transport_banner_text[96];
@@ -7491,24 +7497,45 @@ static bool render_main_panels(gui_app_t *app) {
         uint_fast64_t au_drops = atomic_load(&app->net_audio_server_stream_drops);
         size_t rf_q = atomic_load(&app->net_rf_server_queue_bytes);
         size_t au_q = atomic_load(&app->net_audio_server_queue_bytes);
-        if (rf_drops || au_drops) {
+        if (rf_drops) {
             snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
-                     "Stream overload RF:%llu Audio:%llu", (unsigned long long)rf_drops,
+                     "RF TRANSFER TOO SLOW - server dropped %llu stream(s)",
+                     (unsigned long long)rf_drops);
+            rf_transport_banner = rf_transport_critical = true;
+        } else if (au_drops) {
+            snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
+                     "Audio stream overload - dropped %llu stream(s)",
                      (unsigned long long)au_drops);
             rf_transport_banner = rf_transport_critical = true;
-        } else if (rf_q >= 48U * 1024U * 1024U || au_q >= 48U * 1024U * 1024U) {
+        } else if (rf_q >= gui_net_queue_warn_bytes(GUI_NET_RF_QUEUE_LIMIT_BYTES)) {
             snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
-                     "Stream queue high RF:%u%% Audio:%u%%",
-                     (unsigned)((rf_q * 100) / (64U * 1024U * 1024U)),
-                     (unsigned)((au_q * 100) / (64U * 1024U * 1024U)));
+                     "RF NETWORK BOTTLENECK - queue %u%% of 256MiB (link/receiver)",
+                     gui_net_queue_percent(rf_q, GUI_NET_RF_QUEUE_LIMIT_BYTES));
+            rf_transport_banner = true;
+        } else if (au_q >= gui_net_queue_warn_bytes(GUI_NET_AUDIO_QUEUE_LIMIT_BYTES)) {
+            snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
+                     "Audio network backlog - queue %u%% of 64MiB",
+                     gui_net_queue_percent(au_q, GUI_NET_AUDIO_QUEUE_LIMIT_BYTES));
             rf_transport_banner = true;
         }
     } else if (!status_is_error && app->settings.net_mode == GUI_NET_MODE_CLIENT) {
         uint_fast64_t rf = atomic_load(&app->net_rf_client_interruptions);
         uint_fast64_t au = atomic_load(&app->net_audio_client_interruptions);
-        if (rf || au) {
+        uint_fast64_t server_drops = atomic_load(&app->net_rf_server_stream_drops);
+        size_t server_queue = atomic_load(&app->net_rf_server_queue_bytes);
+        if (server_drops) {
             snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
-                     "Stream interruptions RF:%llu Audio:%llu",
+                     "RF TRANSFER TOO SLOW - server queue overflow (%llu drop(s))",
+                     (unsigned long long)server_drops);
+            rf_transport_banner = rf_transport_critical = true;
+        } else if (server_queue >= gui_net_queue_warn_bytes(GUI_NET_RF_QUEUE_LIMIT_BYTES)) {
+            snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
+                     "RF transfer backlog on server - %u%% (network/receiver)",
+                     gui_net_queue_percent(server_queue, GUI_NET_RF_QUEUE_LIMIT_BYTES));
+            rf_transport_banner = true;
+        } else if (rf || au) {
+            snprintf(rf_transport_banner_text, sizeof(rf_transport_banner_text),
+                     "RF/Audio stream interrupted RF:%llu Audio:%llu (check link/receiver)",
                      (unsigned long long)rf, (unsigned long long)au);
             rf_transport_banner = rf_transport_critical = true;
         }
