@@ -6347,9 +6347,6 @@ static void render_toolbar(gui_app_t *app, bool ddd_compact_labels) {
 // Fixed width for labels to ensure alignment
 #define LABEL_WIDTH 50
 
-// Recording readouts use the main UI font at a slightly larger size.
-#define FONT_SIZE_RECORD_STATS 17
-
 typedef struct {
     uint32_t clip_pos, clip_neg;
     float peak_pos, peak_neg;
@@ -6412,7 +6409,7 @@ static gui_channel_stats_layout_t gui_ui_stats_layout(gui_app_t *app,
     char record_size_max[32];
     snprintf(record_size_max, sizeof(record_size_max), "RAW: %.2f GB",
              (double)UINT64_MAX / 1000000000.0);
-    int record_width = gui_ui_measure_text_width(app, record_size_max, FONT_SIZE_RECORD_STATS, 0);
+    int record_width = gui_ui_measure_text_width(app, record_size_max, FONT_SIZE_STATS, 0);
     width = fmaxf(width, record_width + padding * 2);
     if (!compact) width = fmaxf(width, ceilf(185 * gui_ui_stats_width_scale(s_ui_scale_percent)));
     view_width = (int)width - label_width - gap - padding * 2;
@@ -6670,24 +6667,24 @@ static void render_channel_stats(gui_app_t *app, int channel,
                 }
                 CLAY(CLAY_IDI("RecDurationRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                     CLAY_TEXT(make_string(buf_rec_duration),
-                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                        CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                 }
                 if (!quarter_scale_layout) {
                     CLAY(CLAY_IDI("RecRawRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                         CLAY_TEXT(make_string(buf_rec_raw),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                     }
                 }
                 if (buf_rec_flac[0]) {
                     CLAY(CLAY_IDI("RecFlacRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                         CLAY_TEXT(make_string(buf_rec_flac),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                     }
                 }
                 if (buf_rec_ratio[0]) {
                     CLAY(CLAY_IDI("RecRatioRow", channel), { .layout = STAT_ROW_LAYOUT }) {
                         CLAY_TEXT(make_string(buf_rec_ratio),
-                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_RECORD_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
+                            CLAY_TEXT_CONFIG({ .fontSize = FONT_SIZE_STATS, .fontId = 0, .textColor = to_clay_color(channel_value_color) }));
                     }
                 }
                 if (m_record) {
@@ -6700,7 +6697,7 @@ static void render_channel_stats(gui_app_t *app, int channel,
                         m_record->rec_waits[channel],m_record->rec_drops[channel]);
                     CLAY(CLAY_IDI("MClientRecordBuffer",channel),{.layout=STAT_ROW_LAYOUT}){
                         CLAY_TEXT(make_string(m_rec_buffers[channel]),
-                            CLAY_TEXT_CONFIG({.fontSize = FONT_SIZE_RECORD_STATS, .fontId = 0,
+                            CLAY_TEXT_CONFIG({.fontSize = FONT_SIZE_STATS, .fontId = 0,
                                 .textColor=to_clay_color(m_record->rec_fill_pct[channel]>=80?COLOR_CLIP_RED:channel_value_color)}));
                     }
                     if (channel==0 && m_record->local_save) {
@@ -6712,7 +6709,7 @@ static void render_channel_stats(gui_app_t *app, int channel,
                             percent,(double)m_record->send_queue_bytes/1048576.0);
                         CLAY(CLAY_ID("MClientLocalSendBuffer"),{.layout=STAT_ROW_LAYOUT}){
                             CLAY_TEXT(make_string(m_send_buffer),
-                                CLAY_TEXT_CONFIG({.fontSize=FONT_SIZE_STATS,.fontId=1,
+                                CLAY_TEXT_CONFIG({.fontSize=FONT_SIZE_STATS,.fontId=0,
                                     .textColor=to_clay_color(percent>=80?COLOR_CLIP_RED:channel_value_color)}));
                         }
                     }
@@ -7475,7 +7472,15 @@ static bool render_main_panels(gui_app_t *app) {
     // readout (and widen the message budget) so the actual error text isn't
     // truncated behind the free-space label. This is what makes CXADC/USB
     // permission failures readable in the bottom bar instead of "CXADC permi...".
+    /* Preview failure is a live M-Client state, not a permanent status
+     * message.  This prevents an old failure from surviving preview recovery,
+     * Disconnect/Connect, or switching away from Monitor Client mode. */
+    const char *const preview_status = "Monitor preview error: showing last valid frame";
     const char *raw_status_gate = (app->status_message[0] != '\0') ? app->status_message : NULL;
+    if (raw_status_gate && strcmp(raw_status_gate, preview_status) == 0) {
+        /* Ignore the legacy sticky text if an older code path stored it. */
+        raw_status_gate = NULL;
+    }
     bool status_is_error = false;
     if (raw_status_gate) {
         status_is_error =
@@ -7488,6 +7493,11 @@ static bool render_main_panels(gui_app_t *app) {
             strstr(raw_status_gate, "not granted") != NULL ||
             strstr(raw_status_gate, "timed out") != NULL ||
             strstr(raw_status_gate, "Capture stopped:") != NULL;
+    }
+    if (!status_is_error && app->settings.net_mode == GUI_NET_MODE_MONITOR_CLIENT &&
+        gui_monitor_client_running() && gui_monitor_client_preview_error()) {
+        raw_status_gate = preview_status;
+        status_is_error = true;
     }
     /* Network backpressure is distinct from USB/capture buffer errors.
      * Server-reported RF queue overflow proves that the transfer path cannot
@@ -7628,8 +7638,8 @@ static bool render_main_panels(gui_app_t *app) {
     }
 
     const char *raw_status = rf_transport_banner ? rf_transport_banner_text :
-        ((app->status_message[0] != '\0') ? app->status_message :
-          (app->is_capturing ? "Capturing..." : "Ready"));
+        (raw_status_gate ? raw_status_gate :
+         (app->is_capturing ? "Capturing..." : "Ready"));
     Color status_color = COLOR_TEXT_DIM;
     if (status_is_error) {
         status_color = COLOR_CLIP_RED;
