@@ -1647,11 +1647,45 @@ static void client_stop_ingest(gui_app_t *app, net_client_t *cli) {
 /* Worker thread: connect, poll /stats + /devices + /controls, mirror, and
  * forward queued command flags to the server. Does NOT touch is_capturing or
  * buffers directly (the main thread starts/stops ingest on state changes). */
+/* The server /stats counters are lifetime totals. A legacy Client session
+ * must show only dropouts since THAT client session began; otherwise a stale
+ * server overflow immediately re-triggers the warning after mode switching.
+ * Keep the baseline in the worker (one worker per explicit Client connection)
+ * rather than clearing the server's counters, which other clients may need.
+ */
+typedef struct {
+    uint64_t baseline;
+    bool initialized;
+} net_client_drop_baseline_t;
+
+static uint64_t net_client_session_drops(net_client_drop_baseline_t *state,
+                                         uint64_t server_total) {
+    /* A restarted server can reset its totals. Re-baseline, never underflow. */
+    if (!state->initialized || server_total < state->baseline) {
+        state->baseline = server_total;
+        state->initialized = true;
+    }
+    return server_total - state->baseline;
+}
+
+static void net_client_clear_stream_diagnostics(gui_app_t *app) {
+    if (!app) return;
+    atomic_store(&app->net_rf_client_interruptions, 0);
+    atomic_store(&app->net_audio_client_interruptions, 0);
+    atomic_store(&app->net_rf_server_stream_drops, 0);
+    atomic_store(&app->net_audio_server_stream_drops, 0);
+    atomic_store(&app->net_rf_server_queue_bytes, 0);
+    atomic_store(&app->net_audio_server_queue_bytes, 0);
+    atomic_store(&app->net_rf_client_stream_live, false);
+}
+
 static int client_worker_thread(void *arg) {
     net_client_t *cli = (net_client_t *)arg;
     gui_app_t *app = cli->app;
     int backoff_ms = 500;
     int last_peer_state = -1;
+    net_client_drop_baseline_t rf_drops = {0};
+    net_client_drop_baseline_t audio_drops = {0};
     int miss_streak = 0;  /* consecutive /stats failures; tear down ingest only after several */
     bool first_contact = false;  /* fetch /devices immediately on first good /stats */
     while (!atomic_load(&cli->stop_flag)) {
@@ -1735,10 +1769,14 @@ static int client_worker_thread(void *arg) {
                      (size_t)(rf_queue > GUI_NET_RF_QUEUE_LIMIT_BYTES ? GUI_NET_RF_QUEUE_LIMIT_BYTES : rf_queue));
         atomic_store(&app->net_audio_server_queue_bytes,
                      (size_t)(audio_queue > GUI_NET_AUDIO_QUEUE_LIMIT_BYTES ? GUI_NET_AUDIO_QUEUE_LIMIT_BYTES : audio_queue));
+        /* Report only NEW server overflows since this Client session began.
+         * The server keeps its lifetime counters for independent clients. */
         atomic_store(&app->net_rf_server_stream_drops,
-                     json_uint64(stats, "rf_fanout_stream_drops", 0));
+                     net_client_session_drops(&rf_drops,
+                         json_uint64(stats, "rf_fanout_stream_drops", 0)));
         atomic_store(&app->net_audio_server_stream_drops,
-                     json_uint64(stats, "audio_fanout_stream_drops", 0));
+                     net_client_session_drops(&audio_drops,
+                         json_uint64(stats, "audio_fanout_stream_drops", 0)));
         atomic_store(&cli->peer_state, st);
         atomic_store(&cli->peer_sample_rate, sr);
         atomic_store(&cli->peer_selected, sel);
@@ -1967,6 +2005,9 @@ static int client_start_worker(net_client_t *cli) {
     if (cli->monitor_only) return -1;  /* No legacy RF ingest in M-Client. */
     if (atomic_load(&cli->worker_started)) return 0;
     if (!cli->host[0]) return -1;
+    /* Explicit reconnect, mode switch, or a newly selected server: fresh UI
+     * counters. The worker also establishes a new remote /stats baseline. */
+    net_client_clear_stream_diagnostics(cli->app);
     atomic_store(&cli->stop_flag, false);
     if (thrd_create(&cli->worker_thread, client_worker_thread, cli) != thrd_success) {
         return -1;
@@ -1990,6 +2031,9 @@ static void client_stop_worker(net_client_t *cli) {
     atomic_store(&cli->error, false);
     atomic_store(&cli->peer_state, 0);
     atomic_store(&cli->stop_flag, false);
+    /* The previous manual Client connection is over. Do not keep the old
+     * red warning visible while disconnected or after a mode transition. */
+    net_client_clear_stream_diagnostics(cli->app);
 }
 
 static int client_start(gui_app_t *app, const char *host, uint16_t port,
@@ -2022,16 +2066,9 @@ static int client_start(gui_app_t *app, const char *host, uint16_t port,
     net_mutex_init(&cli->dev_mtx);
     net_mutex_init(&cli->disc_mtx);
 
-    atomic_store(&app->net_rf_client_interruptions, 0);
-    atomic_store(&app->net_audio_client_interruptions, 0);
-    /* Do not display stale backpressure from a previous server/session. */
-    if (!monitor_only) {
-        atomic_store(&app->net_rf_server_stream_drops, 0);
-        atomic_store(&app->net_audio_server_stream_drops, 0);
-        atomic_store(&app->net_rf_server_queue_bytes, 0);
-        atomic_store(&app->net_audio_server_queue_bytes, 0);
-    }
-    atomic_store(&app->net_rf_client_stream_live, false);
+    /* An explicit mode change starts a fresh Client UI session. Monitor
+     * Client has separate diagnostics and does not use the legacy fanout. */
+    if (!monitor_only) net_client_clear_stream_diagnostics(app);
     /* Start the UDP discovery listener so the UI can show found servers, even
      * before a specific host is selected. */
     if (thrd_create(&cli->discovery_thread, client_discovery_thread, cli) != thrd_success) {
