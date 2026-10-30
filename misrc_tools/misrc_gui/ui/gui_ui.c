@@ -6755,44 +6755,34 @@ static void render_channel_stats(gui_app_t *app, int channel,
                             .wrapMode = CLAY_TEXT_WRAP_NONE,
                             .textColor = to_clay_color(COLOR_TEXT) }));
                 }
-                // Two small columns, rather than five full-width statistics.
+                // Full-width rows keep values readable inside the narrow
+                // channel sidebar. Two equal-sized columns forced the labels
+                // and compression readout to use tiny text.
                 if (!quarter_scale_layout) {
-                    CLAY(CLAY_IDI("RecSizesRow", channel), {
-                        .layout = {
-                            .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
-                            .layoutDirection = CLAY_LEFT_TO_RIGHT,
-                            .childGap = 6
-                        }
-                    }) {
-                        CLAY(CLAY_IDI("RecRawColumn", channel), {
-                            .layout = {
-                                .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
-                                .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                .childGap = 1
-                            }
+                    CLAY(CLAY_IDI("RecRawRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                        CLAY(CLAY_IDI("RecRawLabel", channel), {
+                            .layout = { .sizing = { CLAY_SIZING_FIXED(52), CLAY_SIZING_FIT(0) } }
                         }) {
-                            CLAY_TEXT(CLAY_STRING("RAW"), CLAY_TEXT_CONFIG({ .fontSize = 13,
+                            CLAY_TEXT(CLAY_STRING("RAW:"), CLAY_TEXT_CONFIG({
+                                .fontSize = FONT_SIZE_STATS, .fontId = 0,
                                 .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                            CLAY_TEXT(make_string(buf_rec_raw + 5), CLAY_TEXT_CONFIG({
-                                .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0,
-                                .wrapMode = CLAY_TEXT_WRAP_NONE,
-                                .textColor = to_clay_color(COLOR_TEXT) }));
                         }
-                        if (buf_rec_flac[0]) {
-                            CLAY(CLAY_IDI("RecFlacColumn", channel), {
-                                .layout = {
-                                    .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
-                                    .layoutDirection = CLAY_TOP_TO_BOTTOM,
-                                    .childGap = 1
-                                }
+                        CLAY_TEXT(make_string(buf_rec_raw + 5), CLAY_TEXT_CONFIG({
+                            .fontSize = 18, .fontId = 0, .wrapMode = CLAY_TEXT_WRAP_NONE,
+                            .textColor = to_clay_color(COLOR_TEXT) }));
+                    }
+                    if (buf_rec_flac[0]) {
+                        CLAY(CLAY_IDI("RecFlacRow", channel), { .layout = STAT_ROW_LAYOUT }) {
+                            CLAY(CLAY_IDI("RecFlacLabel", channel), {
+                                .layout = { .sizing = { CLAY_SIZING_FIXED(52), CLAY_SIZING_FIT(0) } }
                             }) {
-                                CLAY_TEXT(CLAY_STRING("FLAC"), CLAY_TEXT_CONFIG({ .fontSize = 13,
+                                CLAY_TEXT(CLAY_STRING("FLAC:"), CLAY_TEXT_CONFIG({
+                                    .fontSize = FONT_SIZE_STATS, .fontId = 0,
                                     .textColor = to_clay_color(COLOR_TEXT_DIM) }));
-                                CLAY_TEXT(make_string(buf_rec_flac + 6), CLAY_TEXT_CONFIG({
-                                    .fontSize = FONT_SIZE_RECORD_READOUT, .fontId = 0,
-                                    .wrapMode = CLAY_TEXT_WRAP_NONE,
-                                    .textColor = to_clay_color(COLOR_TEXT) }));
                             }
+                            CLAY_TEXT(make_string(buf_rec_flac + 6), CLAY_TEXT_CONFIG({
+                                .fontSize = 18, .fontId = 0, .wrapMode = CLAY_TEXT_WRAP_NONE,
+                                .textColor = to_clay_color(COLOR_TEXT) }));
                         }
                     }
                 }
@@ -6802,13 +6792,14 @@ static void render_channel_stats(gui_app_t *app, int channel,
                             .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) },
                             .layoutDirection = CLAY_LEFT_TO_RIGHT,
                             .childAlignment = { .y = CLAY_ALIGN_Y_CENTER },
-                            .childGap = 5
+                            .childGap = 6
                         }
                     }) {
                         CLAY_TEXT(CLAY_STRING("Compression"), CLAY_TEXT_CONFIG({
-                            .fontSize = 13, .textColor = to_clay_color(COLOR_TEXT_DIM) }));
+                            .fontSize = FONT_SIZE_STATS, .fontId = 0,
+                            .textColor = to_clay_color(COLOR_TEXT_DIM) }));
                         CLAY_TEXT(make_string(buf_rec_ratio + 7), CLAY_TEXT_CONFIG({
-                            .fontSize = 14, .fontId = 0,
+                            .fontSize = 18, .fontId = 0, .wrapMode = CLAY_TEXT_WRAP_NONE,
                             .textColor = to_clay_color(COLOR_SYNC_GREEN) }));
                     }
                 }
