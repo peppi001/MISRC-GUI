@@ -4,6 +4,7 @@
  */
 
 #include "gui_net.h"
+#include "gui_net_queue_limits.h"
 #include "gui_monitor_transport.h"
 #include "gui_monitor_local_save.h"
 #include "../input/gui_playback.h"
@@ -199,7 +200,6 @@ static int net_read_headers(net_sock_t fd, char *buf, size_t cap) {
  * queue to exhaust the server's memory.
  * ------------------------------------------------------------------------- */
 
-#define NET_FANOUT_MAX_BYTES (64U * 1024U * 1024U)
 
 typedef struct net_chunk {
     size_t len;
@@ -235,7 +235,7 @@ static void net_fanout_init(net_fanout_t *f, gui_app_t *telemetry_app, bool audi
     memset(f, 0, sizeof(*f));
     net_mutex_init(&f->mtx);
     net_cond_init(&f->cond);
-    f->max_bytes = NET_FANOUT_MAX_BYTES;
+    f->max_bytes = audio_queue ? GUI_NET_AUDIO_QUEUE_LIMIT_BYTES : GUI_NET_RF_QUEUE_LIMIT_BYTES;
     f->telemetry_app = telemetry_app;
     f->audio_queue = audio_queue;
     f->initialized = true;
@@ -374,8 +374,9 @@ static void net_fanout_push(net_fanout_t *f, const void *data, size_t len) {
             }
         }
         if (!dropped) break;
-        fprintf(stderr, "[NET] %s fanout: client too slow, dropping stream to bound server memory\n",
-                f->audio_queue ? "Audio" : "RF");
+        fprintf(stderr, "[NET] %s fanout: transmit/receive throughput insufficient; "
+                        "client stream dropped (queue limit %zu MiB)\n",
+                f->audio_queue ? "Audio" : "RF", f->max_bytes / (1024U * 1024U));
         net_fanout_trim_locked(f);
     }
     net_cond_broadcast(&f->cond);
@@ -679,18 +680,24 @@ void gui_net_status_string(const gui_app_t *app, char *buf, size_t len) {
             uint_fast64_t au_drops = atomic_load(&s_server->app->net_audio_server_stream_drops);
             size_t rf_q = atomic_load(&s_server->app->net_rf_server_queue_bytes);
             size_t au_q = atomic_load(&s_server->app->net_audio_server_queue_bytes);
-            unsigned rf_pct = (unsigned)((rf_q * 100) / NET_FANOUT_MAX_BYTES);
-            unsigned au_pct = (unsigned)((au_q * 100) / NET_FANOUT_MAX_BYTES);
+            unsigned rf_pct = gui_net_queue_percent(rf_q, GUI_NET_RF_QUEUE_LIMIT_BYTES);
+            unsigned au_pct = gui_net_queue_percent(au_q, GUI_NET_AUDIO_QUEUE_LIMIT_BYTES);
             if (rf_drops || au_drops) {
-                snprintf(buf, len, "STREAM DROP RF:%llu Audio:%llu; queue RF:%u%% Audio:%u%%",
-                         (unsigned long long)rf_drops, (unsigned long long)au_drops,
-                         rf_pct, au_pct);
-            } else if (rf_pct >= 75 || au_pct >= 75) {
-                snprintf(buf, len, "STREAM QUEUE HIGH RF:%u%% Audio:%u%% of 64 MiB each",
-                         rf_pct, au_pct);
+                snprintf(buf, len,
+                    "RF/Audio throughput insufficient: dropped RF:%llu Audio:%llu; "
+                    "network queue RF:%u%%/256MiB Audio:%u%%/64MiB (link or receiver)",
+                    (unsigned long long)rf_drops, (unsigned long long)au_drops,
+                    rf_pct, au_pct);
+            } else if (rf_pct >= GUI_NET_QUEUE_WARN_PERCENT ||
+                       au_pct >= GUI_NET_QUEUE_WARN_PERCENT) {
+                snprintf(buf, len,
+                    "RF/Audio transfer backlog: RF:%u%%/256MiB Audio:%u%%/64MiB; "
+                    "check link/receiver throughput",
+                    rf_pct, au_pct);
             } else {
-                snprintf(buf, len, "Listening :%u; queue RF:%u%% Audio:%u%%; drops 0",
-                         (unsigned)s_server->port, rf_pct, au_pct);
+                snprintf(buf, len,
+                    "Listening :%u; network queues RF:%u%%/256MiB Audio:%u%%/64MiB; drops 0",
+                    (unsigned)s_server->port, rf_pct, au_pct);
             }
         } else {
             snprintf(buf, len, "Server failed to listen on :%u", (unsigned)s_server->port);
@@ -726,13 +733,27 @@ void gui_net_status_string(const gui_app_t *app, char *buf, size_t len) {
         if (atomic_load(&s_client->connected)) {
             uint_fast64_t rf_interruptions = atomic_load(&app->net_rf_client_interruptions);
             uint_fast64_t au_interruptions = atomic_load(&app->net_audio_client_interruptions);
-            if (rf_interruptions || au_interruptions) {
+            uint_fast64_t server_rf_drops = atomic_load(&app->net_rf_server_stream_drops);
+            size_t server_rf_queue = atomic_load(&app->net_rf_server_queue_bytes);
+            unsigned rf_pct = gui_net_queue_percent(server_rf_queue, GUI_NET_RF_QUEUE_LIMIT_BYTES);
+            if (server_rf_drops) {
+                snprintf(buf, len,
+                    "SERVER RF OVERFLOW: insufficient stream throughput (link/receiver); "
+                    "drops:%llu, queue:%u%%/256MiB; local RF interruptions:%llu",
+                    (unsigned long long)server_rf_drops, rf_pct,
+                    (unsigned long long)rf_interruptions);
+            } else if (rf_pct >= GUI_NET_QUEUE_WARN_PERCENT) {
+                snprintf(buf, len,
+                    "RF STREAM AT RISK: server backlog %u%%/256MiB (link/receiver too slow)",
+                    rf_pct);
+            } else if (rf_interruptions || au_interruptions) {
                 bool rf_live = atomic_load(&app->net_rf_client_stream_live);
-                snprintf(buf, len, "STREAM %s: RF:%llu Audio:%llu interruptions; %s:%u",
-                         rf_live ? "RF restored" : "RF retrying",
-                         (unsigned long long)rf_interruptions,
-                         (unsigned long long)au_interruptions,
-                         s_client->host, (unsigned)s_client->port);
+                snprintf(buf, len,
+                    "STREAM %s: RF:%llu Audio:%llu interruptions; check network/receiver; %s:%u",
+                    rf_live ? "recovered" : "retrying",
+                    (unsigned long long)rf_interruptions,
+                    (unsigned long long)au_interruptions,
+                    s_client->host, (unsigned)s_client->port);
             } else {
                 snprintf(buf, len, "Connected to %s:%u", s_client->host, (unsigned)s_client->port);
             }
@@ -804,10 +825,16 @@ static void server_build_stats(gui_app_t *app, char *buf, size_t len) {
         "{\"state\":%d,\"sample_rate\":%u,\"total_samples\":%llu,"
         "\"frames\":%u,\"errors\":%u,\"selected_device\":%d,"
         "\"device_count\":%d,\"device_name\":\"%s\",\"device_type\":%d,"
-        "\"audio_frame_bytes\":%d}",
+        "\"audio_frame_bytes\":%d,"
+        "\"rf_fanout_queue_bytes\":%zu,\"audio_fanout_queue_bytes\":%zu,"
+        "\"rf_fanout_stream_drops\":%llu,\"audio_fanout_stream_drops\":%llu}",
         state, (unsigned)sr, (unsigned long long)total,
         (unsigned)frames, (unsigned)errors, sel,
-        dcount, dname, dtype, audio_frame);
+        dcount, dname, dtype, audio_frame,
+        atomic_load(&app->net_rf_server_queue_bytes),
+        atomic_load(&app->net_audio_server_queue_bytes),
+        (unsigned long long)atomic_load(&app->net_rf_server_stream_drops),
+        (unsigned long long)atomic_load(&app->net_audio_server_stream_drops));
 }
 
 static void server_build_devices(gui_app_t *app, char *buf, size_t len) {
@@ -1356,6 +1383,14 @@ static int json_int(const char *j, const char *key, int def) {
     return atoi(p + strlen(pat));
 }
 
+static uint64_t json_uint64(const char *j, const char *key, uint64_t def) {
+    char pat[64];
+    snprintf(pat, sizeof(pat), "\"%s\":", key);
+    const char *pos = strstr(j, pat);
+    if (!pos) return def;
+    return (uint64_t)strtoull(pos + strlen(pat), NULL, 10);
+}
+
 static void json_str(const char *j, const char *key, char *out, size_t cap) {
     if (!out || cap == 0) return;
     out[0] = '\0';
@@ -1692,6 +1727,18 @@ static int client_worker_thread(void *arg) {
         int sel = json_int(stats, "selected_device", -1);
         int dc = json_int(stats, "device_count", 0);
         int af = json_int(stats, "audio_frame_bytes", 12);
+        /* Optional telemetry from newer servers: older peers simply lack
+         * these fields and retain generic interruption warnings. */
+        uint64_t rf_queue = json_uint64(stats, "rf_fanout_queue_bytes", 0);
+        uint64_t audio_queue = json_uint64(stats, "audio_fanout_queue_bytes", 0);
+        atomic_store(&app->net_rf_server_queue_bytes,
+                     (size_t)(rf_queue > GUI_NET_RF_QUEUE_LIMIT_BYTES ? GUI_NET_RF_QUEUE_LIMIT_BYTES : rf_queue));
+        atomic_store(&app->net_audio_server_queue_bytes,
+                     (size_t)(audio_queue > GUI_NET_AUDIO_QUEUE_LIMIT_BYTES ? GUI_NET_AUDIO_QUEUE_LIMIT_BYTES : audio_queue));
+        atomic_store(&app->net_rf_server_stream_drops,
+                     json_uint64(stats, "rf_fanout_stream_drops", 0));
+        atomic_store(&app->net_audio_server_stream_drops,
+                     json_uint64(stats, "audio_fanout_stream_drops", 0));
         atomic_store(&cli->peer_state, st);
         atomic_store(&cli->peer_sample_rate, sr);
         atomic_store(&cli->peer_selected, sel);
@@ -1977,6 +2024,13 @@ static int client_start(gui_app_t *app, const char *host, uint16_t port,
 
     atomic_store(&app->net_rf_client_interruptions, 0);
     atomic_store(&app->net_audio_client_interruptions, 0);
+    /* Do not display stale backpressure from a previous server/session. */
+    if (!monitor_only) {
+        atomic_store(&app->net_rf_server_stream_drops, 0);
+        atomic_store(&app->net_audio_server_stream_drops, 0);
+        atomic_store(&app->net_rf_server_queue_bytes, 0);
+        atomic_store(&app->net_audio_server_queue_bytes, 0);
+    }
     atomic_store(&app->net_rf_client_stream_live, false);
     /* Start the UDP discovery listener so the UI can show found servers, even
      * before a specific host is selected. */
