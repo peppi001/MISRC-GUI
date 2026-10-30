@@ -2299,30 +2299,52 @@ void gui_net_poll_commands(gui_app_t *app) {
         }
         /* Distinct command channels preserve each protocol's semantics when
          * both kinds of client are connected to this Server at once. */
-        int monitor_record = atomic_exchange(&app->net_cmd_monitor_record, 0);
-        if (monitor_record == 3 && app->is_recording) {
-            fprintf(stderr, "[M-SERVER] executing /monitor/record off\n");
-            gui_app_stop_recording(app);
-        } else if ((monitor_record == 1 || monitor_record == 2) &&
-                   app->is_capturing && !app->is_recording) {
-            bool local = monitor_record == 2;
-            fprintf(stderr, "[M-SERVER] executing /monitor/record on (local=%d)\n", local);
-            if (!local || gui_monitor_local_save_begin() == 0) {
-                int record_rc = gui_app_start_recording(app);
-                if (record_rc == 0) {
-                    fprintf(stderr, "[M-SERVER] recording started (local=%d)\n", local);
-                } else {
-                    fprintf(stderr,
-                            "[M-SERVER] recording did NOT start: rc=%d (%s), output_path='%s', reason='%s'\n",
-                            record_rc, record_rc == 1 ? "awaiting overwrite confirmation" : "error",
-                            app->settings.output_path,
-                            app->status_message[0] ? app->status_message : "no status provided");
-                    if (local) (void)gui_monitor_local_save_end(false);
+        uint64_t monitor_record_id=0;
+        int monitor_record=gui_monitor_server_take_record(app,&monitor_record_id);
+        if(monitor_record){
+            unsigned result=0; /* 0=success, 1=failed, 2=pending GUI confirmation */
+            char reason[384]={0};
+            if(monitor_record==3){
+                if(app->is_recording){
+                    fprintf(stderr,"[M-SERVER] executing /monitor/record off\n");
+                    gui_app_stop_recording(app);
                 }
-            } else {
-                gui_app_set_status(app, "Local Save rejected: receiver unavailable");
-                fprintf(stderr, "[M-LOCAL] Record rejected: receiver unavailable\n");
+            }else if(!app->is_capturing){
+                result=1;
+                snprintf(reason,sizeof(reason),"Start capture first");
+            }else if(app->is_recording){
+                result=1;
+                snprintf(reason,sizeof(reason),"Recording is already running");
+            }else{
+                bool local=monitor_record==2;
+                fprintf(stderr,"[M-SERVER] executing /monitor/record on (local=%d)\n",local);
+                if(!local || gui_monitor_local_save_begin()==0){
+                    int record_rc=gui_app_start_recording(app);
+                    if(record_rc==0){
+                        fprintf(stderr,"[M-SERVER] recording started (local=%d)\n",local);
+                    }else{
+                        result=record_rc==1?2:1;
+                        const char *detail=app->status_message[0]?app->status_message:
+                            "recording did not start";
+                        snprintf(reason,sizeof(reason),"%s",detail);
+                        if(strstr(detail,"Output directory") && app->settings.output_path[0]){
+                            size_t n=strlen(reason);
+                            snprintf(reason+n,sizeof(reason)-n," (%s)",app->settings.output_path);
+                        }
+                        fprintf(stderr,
+                                "[M-SERVER] recording did NOT start: rc=%d (%s), output_path='%s', reason='%s'\n",
+                                record_rc,record_rc==1?"awaiting overwrite confirmation":"error",
+                                app->settings.output_path,detail);
+                        if(local)(void)gui_monitor_local_save_end(false);
+                    }
+                }else{
+                    result=1;
+                    snprintf(reason,sizeof(reason),"Local Save rejected: receiver unavailable");
+                    gui_app_set_status(app,reason);
+                    fprintf(stderr,"[M-LOCAL] Record rejected: receiver unavailable\n");
+                }
             }
+            gui_monitor_server_record_result(monitor_record_id,result,reason);
         }
         if (atomic_exchange(&app->net_cmd_record_on, false)) {
             if (app->is_capturing && !app->is_recording) {

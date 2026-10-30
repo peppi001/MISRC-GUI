@@ -14,6 +14,13 @@ int gui_monitor_server_start(gui_app_t *app, uint16_t port);
 bool gui_monitor_server_handle_request(uintptr_t socket_handle,
                                        gui_app_t *app, const char *request_headers);
 void gui_monitor_server_stop(void);
+/* Record requests are accepted by the socket worker and executed later on
+ * the server main thread. The request id correlates the later result with
+ * the requesting M-Client; status results are kept per server session. */
+uint64_t gui_monitor_server_queue_record(gui_app_t *app, int command);
+int gui_monitor_server_take_record(gui_app_t *app, uint64_t *request_id);
+void gui_monitor_server_record_result(uint64_t request_id, unsigned result,
+                                      const char *detail);
 bool gui_monitor_server_active(void);
 uint16_t gui_monitor_server_port(void);
 int gui_monitor_client_start(gui_app_t *app, const char *host, uint16_t port);
