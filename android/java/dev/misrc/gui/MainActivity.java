@@ -22,6 +22,7 @@ import android.util.Log;
 import android.view.KeyEvent;
 import android.view.DisplayCutout;
 import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.graphics.Insets;
 import android.view.View;
@@ -145,29 +146,42 @@ public class MainActivity extends NativeActivity {
     private int mSafeLeft = -1, mSafeTop = -1, mSafeRight = -1, mSafeBottom = -1;
     private int mSafeWidth = -1, mSafeHeight = -1;
 
+    /** Hide Android's navigation/status bars while the native GUI has focus.
+     * System gestures can temporarily reveal the bars without resizing UI.
+     * The physical display cutout is still excluded below. */
+    private void enforceImmersiveMode() {
+        WindowInsetsController controller = getWindow().getInsetsController();
+        if (controller != null) {
+            controller.setSystemBarsBehavior(
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            controller.hide(WindowInsets.Type.systemBars());
+        }
+    }
+
     private void configureNativeSafeArea() {
-        // Android 11+ (minSdk 30). Fill the surface; let the native GUI lay
-        // out *inside* the real WindowInsets. Do not hardcode notch widths.
+        // Android 11+ (minSdk 30). Request full display coverage, but leave
+        // the actual camera/notch safe insets for the native GUI to honor.
         WindowManager.LayoutParams params = getWindow().getAttributes();
         params.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         getWindow().setAttributes(params);
         getWindow().setDecorFitsSystemWindows(false);
 
         final View decor = getWindow().getDecorView();
         decor.setOnApplyWindowInsetsListener((view, insets) -> {
-            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            // The hidden system bars (including transient bars revealed by a
+            // swipe) must not add a large left/right layout margin. Only the
+            // physical camera/notch cutout needs a persistent safe inset.
             DisplayCutout cutout = insets.getDisplayCutout();
-            int left = bars.left, top = bars.top;
-            int right = bars.right, bottom = bars.bottom;
+            int left = 0, top = 0, right = 0, bottom = 0;
             if (cutout != null) {
-                left = Math.max(left, cutout.getSafeInsetLeft());
-                top = Math.max(top, cutout.getSafeInsetTop());
-                right = Math.max(right, cutout.getSafeInsetRight());
-                bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+                left = cutout.getSafeInsetLeft();
+                top = cutout.getSafeInsetTop();
+                right = cutout.getSafeInsetRight();
+                bottom = cutout.getSafeInsetBottom();
             }
-            // A gesture navigation handle may be transparent, but still needs
-            // a small non-interactive strip beneath the status bar/buttons.
+            // Preserve the bottom mandatory gesture zone if the OS reports
+            // one (usually zero on the short edges in landscape).
             Insets gestures = insets.getInsets(WindowInsets.Type.mandatorySystemGestures());
             bottom = Math.max(bottom, gestures.bottom);
             int w = view.getWidth(), h = view.getHeight();
@@ -187,7 +201,17 @@ public class MainActivity extends NativeActivity {
             }
             return insets; // Allow NativeActivity and its children to receive insets.
         });
+        enforceImmersiveMode();
         decor.requestApplyInsets();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            enforceImmersiveMode();
+            getWindow().getDecorView().requestApplyInsets();
+        }
     }
 
     @Override
@@ -316,6 +340,7 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        enforceImmersiveMode();
         getWindow().getDecorView().requestApplyInsets();
         try {
             nativeRegisterActivity(this);
