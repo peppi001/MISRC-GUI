@@ -122,36 +122,6 @@ void gui_ui_show_scale_hud(int percent)
     s_ui_scale_hud_visible_until_s = GetTime() + GUI_UI_SCALE_HUD_DURATION_S;
 }
 
-void gui_ui_get_safe_insets_pixels(int *left, int *top, int *right, int *bottom)
-{
-    int l = 0, t = 0, r = 0, b = 0;
-#if defined(__ANDROID__)
-    extern void android_gui_get_safe_area(int *, int *, int *, int *, int *, int *);
-    int view_w = 0, view_h = 0;
-    android_gui_get_safe_area(&l, &t, &r, &b, &view_w, &view_h);
-    const int render_w = GetRenderWidth(), render_h = GetRenderHeight();
-    if (view_w > 0 && view_h > 0 && render_w > 0 && render_h > 0) {
-        const float sx = (float)render_w / (float)view_w;
-        const float sy = (float)render_h / (float)view_h;
-        l = (int)roundf(fmaxf(0.0f, (float)l * sx));
-        r = (int)roundf(fmaxf(0.0f, (float)r * sx));
-        t = (int)roundf(fmaxf(0.0f, (float)t * sy));
-        b = (int)roundf(fmaxf(0.0f, (float)b * sy));
-        // Ignore implausible insets (e.g. a transient surface dimension
-        // change while the Android picker is open); retry next frame.
-        if (l + r >= render_w / 2 || t + b >= render_h / 2) {
-            l = t = r = b = 0;
-        }
-    } else {
-        l = t = r = b = 0;
-    }
-#endif
-    if (left) *left = l;
-    if (top) *top = t;
-    if (right) *right = r;
-    if (bottom) *bottom = b;
-}
-
 static int gui_ui_get_base_layout_width(void)
 {
 #if defined(__APPLE__)
@@ -160,9 +130,6 @@ static int gui_ui_get_base_layout_width(void)
     int width = GetRenderWidth();
     if (width <= 0) width = GetScreenWidth();
 #endif
-    int left = 0, right = 0;
-    gui_ui_get_safe_insets_pixels(&left, NULL, &right, NULL);
-    width -= left + right;
     return (width > 0) ? width : 1;
 }
 
@@ -174,9 +141,6 @@ static int gui_ui_get_base_layout_height(void)
     int height = GetRenderHeight();
     if (height <= 0) height = GetScreenHeight();
 #endif
-    int top = 0, bottom = 0;
-    gui_ui_get_safe_insets_pixels(NULL, &top, NULL, &bottom);
-    height -= top + bottom;
     return (height > 0) ? height : 1;
 }
 
@@ -200,10 +164,8 @@ Vector2 gui_ui_get_render_scale(void)
     Vector2 render_scale = { app_scale, app_scale };
     int layout_width = gui_ui_get_layout_width();
     int layout_height = gui_ui_get_layout_height();
-    int left = 0, top = 0, right = 0, bottom = 0;
-    gui_ui_get_safe_insets_pixels(&left, &top, &right, &bottom);
-    int render_width = GetRenderWidth() - left - right;
-    int render_height = GetRenderHeight() - top - bottom;
+    int render_width = GetRenderWidth();
+    int render_height = GetRenderHeight();
     if (render_width > 0 && layout_width > 0) {
         render_scale.x = (float)render_width / (float)layout_width;
     }
@@ -220,11 +182,7 @@ Vector2 gui_ui_get_mouse_position(void)
 #else
     Vector2 position = GetMousePosition();
 #endif
-    int left = 0, top = 0;
-    gui_ui_get_safe_insets_pixels(&left, &top, NULL, NULL);
     float scale = gui_ui_get_scale_factor();
-    position.x -= (float)left;
-    position.y -= (float)top;
     position.x /= scale;
     position.y /= scale;
     return position;

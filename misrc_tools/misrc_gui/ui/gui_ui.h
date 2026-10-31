@@ -59,9 +59,6 @@ Vector2 gui_ui_get_render_scale(void);
 void gui_ui_show_scale_hud(int percent);
 int gui_ui_get_layout_width(void);
 int gui_ui_get_layout_height(void);
-/* The Android display cutout/system navigation area, in raylib render pixels.
- * Zeroes on desktop, or before Android has provided its first WindowInsets. */
-void gui_ui_get_safe_insets_pixels(int *left, int *top, int *right, int *bottom);
 Vector2 gui_ui_get_mouse_position(void);
 
 // Check if UI consumed the current frame's click (prevents click-through to oscilloscope)

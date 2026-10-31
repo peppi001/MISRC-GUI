@@ -20,11 +20,9 @@ import android.text.Editable;
 import android.text.InputType;
 import android.util.Log;
 import android.view.KeyEvent;
-import android.view.DisplayCutout;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
-import android.graphics.Insets;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
@@ -137,18 +135,7 @@ public class MainActivity extends NativeActivity {
      * cannot enumerate /dev/bus/usb without root, so Java owns presence). */
     private native void nativeSetUsbDevicePresent(boolean present);
 
-    /** Pixel insets for the actual edge-to-edge NativeActivity surface.
-     * Include the decor view's pixel dimensions so C can convert to raylib
-     * render pixels even if Android applies surface/backing scaling. */
-    private native void nativeSetGuiSafeArea(int left, int top, int right,
-                                            int bottom, int viewWidth, int viewHeight);
-
-    private int mSafeLeft = -1, mSafeTop = -1, mSafeRight = -1, mSafeBottom = -1;
-    private int mSafeWidth = -1, mSafeHeight = -1;
-
-    /** Hide Android's navigation/status bars while the native GUI has focus.
-     * System gestures can temporarily reveal the bars without resizing UI.
-     * The physical display cutout is still excluded below. */
+    /** Hide the Android system bars; swipes can temporarily reveal them. */
     private void enforceImmersiveMode() {
         WindowInsetsController controller = getWindow().getInsetsController();
         if (controller != null) {
@@ -158,51 +145,16 @@ public class MainActivity extends NativeActivity {
         }
     }
 
-    private void configureNativeSafeArea() {
-        // Android 11+ (minSdk 30). Request full display coverage, but leave
-        // the actual camera/notch safe insets for the native GUI to honor.
+    /** Full-width immersive window. The native UI is no longer globally
+     * shrunk/translated by display-cutout insets. Keep crucial controls away
+     * from the camera's *physical* cutout in a future localized layout pass. */
+    private void configureFullscreenDisplay() {
         WindowManager.LayoutParams params = getWindow().getAttributes();
         params.layoutInDisplayCutoutMode =
                 WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
         getWindow().setAttributes(params);
         getWindow().setDecorFitsSystemWindows(false);
-
-        final View decor = getWindow().getDecorView();
-        decor.setOnApplyWindowInsetsListener((view, insets) -> {
-            // The hidden system bars (including transient bars revealed by a
-            // swipe) must not add a large left/right layout margin. Only the
-            // physical camera/notch cutout needs a persistent safe inset.
-            DisplayCutout cutout = insets.getDisplayCutout();
-            int left = 0, top = 0, right = 0, bottom = 0;
-            if (cutout != null) {
-                left = cutout.getSafeInsetLeft();
-                top = cutout.getSafeInsetTop();
-                right = cutout.getSafeInsetRight();
-                bottom = cutout.getSafeInsetBottom();
-            }
-            // Preserve the bottom mandatory gesture zone if the OS reports
-            // one (usually zero on the short edges in landscape).
-            Insets gestures = insets.getInsets(WindowInsets.Type.mandatorySystemGestures());
-            bottom = Math.max(bottom, gestures.bottom);
-            int w = view.getWidth(), h = view.getHeight();
-            if (w <= 0 || h <= 0) return insets;
-            if (left != mSafeLeft || top != mSafeTop || right != mSafeRight ||
-                bottom != mSafeBottom || w != mSafeWidth || h != mSafeHeight) {
-                mSafeLeft = left; mSafeTop = top;
-                mSafeRight = right; mSafeBottom = bottom;
-                mSafeWidth = w; mSafeHeight = h;
-                try {
-                    nativeSetGuiSafeArea(left, top, right, bottom, w, h);
-                    Log.i(TAG, "GUI safe area(px)=" + left + "," + top + "," +
-                            right + "," + bottom + " view=" + w + "x" + h);
-                } catch (UnsatisfiedLinkError e) {
-                    Log.e(TAG, "nativeSetGuiSafeArea unavailable", e);
-                }
-            }
-            return insets; // Allow NativeActivity and its children to receive insets.
-        });
         enforceImmersiveMode();
-        decor.requestApplyInsets();
     }
 
     @Override
@@ -210,7 +162,6 @@ public class MainActivity extends NativeActivity {
         super.onWindowFocusChanged(hasFocus);
         if (hasFocus) {
             enforceImmersiveMode();
-            getWindow().getDecorView().requestApplyInsets();
         }
     }
 
@@ -231,7 +182,7 @@ public class MainActivity extends NativeActivity {
         }
         // Start NativeActivity (loads libmisrc_gui.so, runs android_main -> main()).
         super.onCreate(savedInstanceState);
-        configureNativeSafeArea();
+        configureFullscreenDisplay();
         // Native symbols are guaranteed after super.onCreate(); push startup
         // storage path now so native fopen() uses app-private external storage.
         if (startupStoragePath != null) {
@@ -341,7 +292,6 @@ public class MainActivity extends NativeActivity {
     protected void onResume() {
         super.onResume();
         enforceImmersiveMode();
-        getWindow().getDecorView().requestApplyInsets();
         try {
             nativeRegisterActivity(this);
         } catch (UnsatisfiedLinkError e) {
