@@ -20,6 +20,10 @@ import android.text.Editable;
 import android.text.InputType;
 import android.util.Log;
 import android.view.KeyEvent;
+import android.view.DisplayCutout;
+import android.view.WindowInsets;
+import android.view.WindowManager;
+import android.graphics.Insets;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.BaseInputConnection;
@@ -132,6 +136,60 @@ public class MainActivity extends NativeActivity {
      * cannot enumerate /dev/bus/usb without root, so Java owns presence). */
     private native void nativeSetUsbDevicePresent(boolean present);
 
+    /** Pixel insets for the actual edge-to-edge NativeActivity surface.
+     * Include the decor view's pixel dimensions so C can convert to raylib
+     * render pixels even if Android applies surface/backing scaling. */
+    private native void nativeSetGuiSafeArea(int left, int top, int right,
+                                            int bottom, int viewWidth, int viewHeight);
+
+    private int mSafeLeft = -1, mSafeTop = -1, mSafeRight = -1, mSafeBottom = -1;
+    private int mSafeWidth = -1, mSafeHeight = -1;
+
+    private void configureNativeSafeArea() {
+        // Android 11+ (minSdk 30). Fill the surface; let the native GUI lay
+        // out *inside* the real WindowInsets. Do not hardcode notch widths.
+        WindowManager.LayoutParams params = getWindow().getAttributes();
+        params.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        getWindow().setAttributes(params);
+        getWindow().setDecorFitsSystemWindows(false);
+
+        final View decor = getWindow().getDecorView();
+        decor.setOnApplyWindowInsetsListener((view, insets) -> {
+            Insets bars = insets.getInsets(WindowInsets.Type.systemBars());
+            DisplayCutout cutout = insets.getDisplayCutout();
+            int left = bars.left, top = bars.top;
+            int right = bars.right, bottom = bars.bottom;
+            if (cutout != null) {
+                left = Math.max(left, cutout.getSafeInsetLeft());
+                top = Math.max(top, cutout.getSafeInsetTop());
+                right = Math.max(right, cutout.getSafeInsetRight());
+                bottom = Math.max(bottom, cutout.getSafeInsetBottom());
+            }
+            // A gesture navigation handle may be transparent, but still needs
+            // a small non-interactive strip beneath the status bar/buttons.
+            Insets gestures = insets.getInsets(WindowInsets.Type.mandatorySystemGestures());
+            bottom = Math.max(bottom, gestures.bottom);
+            int w = view.getWidth(), h = view.getHeight();
+            if (w <= 0 || h <= 0) return insets;
+            if (left != mSafeLeft || top != mSafeTop || right != mSafeRight ||
+                bottom != mSafeBottom || w != mSafeWidth || h != mSafeHeight) {
+                mSafeLeft = left; mSafeTop = top;
+                mSafeRight = right; mSafeBottom = bottom;
+                mSafeWidth = w; mSafeHeight = h;
+                try {
+                    nativeSetGuiSafeArea(left, top, right, bottom, w, h);
+                    Log.i(TAG, "GUI safe area(px)=" + left + "," + top + "," +
+                            right + "," + bottom + " view=" + w + "x" + h);
+                } catch (UnsatisfiedLinkError e) {
+                    Log.e(TAG, "nativeSetGuiSafeArea unavailable", e);
+                }
+            }
+            return insets; // Allow NativeActivity and its children to receive insets.
+        });
+        decor.requestApplyInsets();
+    }
+
     @Override
     public void onCreate(android.os.Bundle savedInstanceState) {
         // Initialize Java-side USB services first.
@@ -149,6 +207,7 @@ public class MainActivity extends NativeActivity {
         }
         // Start NativeActivity (loads libmisrc_gui.so, runs android_main -> main()).
         super.onCreate(savedInstanceState);
+        configureNativeSafeArea();
         // Native symbols are guaranteed after super.onCreate(); push startup
         // storage path now so native fopen() uses app-private external storage.
         if (startupStoragePath != null) {
@@ -257,6 +316,7 @@ public class MainActivity extends NativeActivity {
     @Override
     protected void onResume() {
         super.onResume();
+        getWindow().getDecorView().requestApplyInsets();
         try {
             nativeRegisterActivity(this);
         } catch (UnsatisfiedLinkError e) {

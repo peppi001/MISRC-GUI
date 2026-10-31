@@ -42,6 +42,12 @@ extern void hsdaoh_set_android_usb_fd(int fd) __attribute__((weak));
 /* ---- state ---- */
 static atomic_int  s_usb_fd = -1;          /* granted fd, -1 = none */
 static atomic_int  s_usb_device_present = 0; /* Java-reported physical attach state */
+/* The Java decor surface is laid out edge-to-edge. Insets are *view pixels*;
+ * gui_ui.c converts them to raylib render pixels per frame. All updates come
+ * from the Android UI thread, reads from the native rendering thread. */
+static atomic_int s_gui_safe_left = 0, s_gui_safe_top = 0;
+static atomic_int s_gui_safe_right = 0, s_gui_safe_bottom = 0;
+static atomic_int s_gui_safe_view_width = 0, s_gui_safe_view_height = 0;
 static JavaVM     *s_jvm = NULL;            /* cached in JNI_OnLoad */
 static jobject     s_activity_ref = NULL;  /* global ref to MainActivity */
 
@@ -197,6 +203,30 @@ Java_dev_misrc_gui_MainActivity_nativeSetUsbDevicePresent(JNIEnv *env, jobject t
     (void)env; (void)thiz;
     atomic_store(&s_usb_device_present, present ? 1 : 0);
     LOGI("nativeSetUsbDevicePresent: %d", present ? 1 : 0);
+}
+
+JNIEXPORT void JNICALL
+Java_dev_misrc_gui_MainActivity_nativeSetGuiSafeArea(JNIEnv *env, jobject thiz,
+    jint left, jint top, jint right, jint bottom, jint viewWidth, jint viewHeight)
+{
+    (void)env; (void)thiz;
+    atomic_store(&s_gui_safe_left, (int)left);
+    atomic_store(&s_gui_safe_top, (int)top);
+    atomic_store(&s_gui_safe_right, (int)right);
+    atomic_store(&s_gui_safe_bottom, (int)bottom);
+    atomic_store(&s_gui_safe_view_width, (int)viewWidth);
+    atomic_store(&s_gui_safe_view_height, (int)viewHeight);
+}
+
+void android_gui_get_safe_area(int *left, int *top, int *right, int *bottom,
+                               int *view_width, int *view_height)
+{
+    if (left) *left = atomic_load(&s_gui_safe_left);
+    if (top) *top = atomic_load(&s_gui_safe_top);
+    if (right) *right = atomic_load(&s_gui_safe_right);
+    if (bottom) *bottom = atomic_load(&s_gui_safe_bottom);
+    if (view_width) *view_width = atomic_load(&s_gui_safe_view_width);
+    if (view_height) *view_height = atomic_load(&s_gui_safe_view_height);
 }
 
 int android_usb_device_present(void)

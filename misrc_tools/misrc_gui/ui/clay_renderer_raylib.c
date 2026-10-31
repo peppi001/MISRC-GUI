@@ -59,8 +59,14 @@ void Clay_Raylib_Close()
 void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
 {
     float ui_scale = gui_ui_get_scale_factor();
+    int safe_left = 0, safe_top = 0;
+    gui_ui_get_safe_insets_pixels(&safe_left, &safe_top, NULL, NULL);
     Matrix outer_modelview = rlGetMatrixModelview();
     rlDrawRenderBatchActive();
+    // Keep modelview, Clay layout size and touch coordinates in the same
+    // native surface coordinate system. Notch + navigation insets shift the
+    // entire UI; individual panels must never estimate these margins.
+    rlTranslatef((float)safe_left, (float)safe_top, 0.0f);
     rlScalef(ui_scale, ui_scale, 1.0f);
 
     for (int j = 0; j < renderCommands.length; j++)
@@ -106,10 +112,12 @@ void Clay_Raylib_Render(Clay_RenderCommandArray renderCommands, Font* fonts)
             }
             case CLAY_RENDER_COMMAND_TYPE_SCISSOR_START: {
                 Clay_BoundingBox box = renderCommand->boundingBox;
-                int left = (int)floorf(box.x * ui_scale);
-                int top = (int)floorf(box.y * ui_scale);
-                int right = (int)ceilf((box.x + box.width) * ui_scale);
-                int bottom = (int)ceilf((box.y + box.height) * ui_scale);
+                // raylib scissors bypass the modelview matrix: apply the
+                // exact same translation used by the drawn Clay primitives.
+                int left = safe_left + (int)floorf(box.x * ui_scale);
+                int top = safe_top + (int)floorf(box.y * ui_scale);
+                int right = safe_left + (int)ceilf((box.x + box.width) * ui_scale);
+                int bottom = safe_top + (int)ceilf((box.y + box.height) * ui_scale);
                 BeginScissorMode(left, top, right - left, bottom - top);
                 break;
             }
