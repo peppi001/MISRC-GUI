@@ -1606,10 +1606,10 @@ int main(int argc, char **argv)
 
 	if (do_exit)
 		fprintf(stderr, "\nUser cancel, exiting...\n");
-	cli_capture_logf("INFO", "Capture stopped: samples=%" PRIu64 " stop_requested=%s",
-	                 total_samples, do_exit ? "yes" : "no");
 	else
 		fprintf(stderr, "\nLibrary error %d, exiting...\n", r);
+	cli_capture_logf("INFO", "Capture stopped: samples=%" PRIu64 " stop_requested=%s",
+	                 total_samples, do_exit ? "yes" : "no");
 
 	if (hs_dev) { hsdaoh_close(hs_dev); hs_dev = NULL; }
 	if (sc_dev) { sc_stop_capture(sc_dev); sc_dev = NULL; }
