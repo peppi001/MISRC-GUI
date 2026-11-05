@@ -164,6 +164,11 @@ typedef struct {
 typedef struct {
 	ringbuffer_t rb;
 	FILE *f;
+#if LIBFLAC_ENABLED == 1
+	uint64_t flac_samples_written;
+	uint32_t flac_sample_rate_khz;
+	bool flac_finish_ok;
+#endif
 #if LIBSOXR_ENABLED == 1
 	conv_16to32_t conv_func;
 	double init_scale;
@@ -703,6 +708,82 @@ static void cli_flac_error_callback(void *user_data, flac_writer_error_t error, 
 	fprintf(stderr, "FLAC ERROR: %s\n", message);
 }
 
+
+/* RF samples are stored at 40 MSPS, but FLAC STREAMINFO uses 40 kHz.
+ * Match the GUI's post-encode duration correction, changing metadata only.
+ * This runs after flac_writer_finish() has closed the output file. */
+static bool cli_finalize_rf_flac_metadata(const char *path, uint64_t total_samples,
+                                           uint32_t sample_rate_khz)
+{
+    if (!path || !path[0] || !total_samples || !sample_rate_khz) return false;
+
+    const uint64_t sample_rate_hz = (uint64_t)sample_rate_khz * 1000ULL;
+    const double seconds = (double)total_samples / (double)sample_rate_hz;
+    const uint64_t length_ms = (uint64_t)llround(seconds * 1000.0);
+    uint64_t stored_samples = (total_samples / 1000ULL) +
+                              ((total_samples % 1000ULL) >= 500ULL);
+    if (stored_samples == 0) stored_samples = 1;
+    if (stored_samples > ((1ULL << 36) - 1ULL))
+        stored_samples = (1ULL << 36) - 1ULL;
+
+    char duration[64], length[32], count[32], rate[32], rate_khz[32];
+    snprintf(duration, sizeof(duration), "%.6f", seconds);
+    snprintf(length, sizeof(length), "%" PRIu64, length_ms);
+    snprintf(count, sizeof(count), "%" PRIu64, total_samples);
+    snprintf(rate, sizeof(rate), "%" PRIu64, sample_rate_hz);
+    snprintf(rate_khz, sizeof(rate_khz), "%u", sample_rate_khz);
+    const char *names[] = {"DURATION_SECONDS", "LENGTH", "RF_TOTAL_SAMPLES",
+                           "RF_SAMPLE_RATE", "RF_SAMPLE_RATE_KHZ"};
+    const char *values[] = {duration, length, count, rate, rate_khz};
+
+    FLAC__Metadata_SimpleIterator *it = FLAC__metadata_simple_iterator_new();
+    if (!it) return false;
+    if (!FLAC__metadata_simple_iterator_init(it, path, false, true)) {
+        FLAC__metadata_simple_iterator_delete(it);
+        return false;
+    }
+
+    bool info_ok = false, tags_ok = false;
+    FLAC__StreamMetadata *block = FLAC__metadata_simple_iterator_get_block(it);
+    if (block && block->type == FLAC__METADATA_TYPE_STREAMINFO) {
+        block->data.stream_info.total_samples = stored_samples;
+        block->data.stream_info.sample_rate = sample_rate_khz;
+        info_ok = FLAC__metadata_simple_iterator_set_block(it, block, false);
+    }
+    if (block) FLAC__metadata_object_delete(block);
+
+    if (info_ok) {
+        while (FLAC__metadata_simple_iterator_next(it)) {
+            block = FLAC__metadata_simple_iterator_get_block(it);
+            if (!block) continue;
+            if (block->type == FLAC__METADATA_TYPE_VORBIS_COMMENT) {
+                bool ready = true;
+                for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+                    FLAC__StreamMetadata_VorbisComment_Entry entry;
+                    if (!FLAC__metadata_object_vorbiscomment_entry_from_name_value_pair(
+                            &entry, names[i], values[i])) {
+                        ready = false;
+                        break;
+                    }
+                    if (!FLAC__metadata_object_vorbiscomment_append_comment(
+                            block, entry, false)) {
+                        free(entry.entry);
+                        ready = false;
+                        break;
+                    }
+                }
+                if (ready)
+                    tags_ok = FLAC__metadata_simple_iterator_set_block(it, block, true);
+                FLAC__metadata_object_delete(block);
+                break;
+            }
+            FLAC__metadata_object_delete(block);
+        }
+    }
+    FLAC__metadata_simple_iterator_delete(it);
+    return info_ok && tags_ok;
+}
+
 int flac_file_writer(void *ctx)
 {
 	filewriter_ctx_t *file_ctx = ctx;
@@ -791,7 +872,10 @@ int flac_file_writer(void *ctx)
 		rb_read_finished(&file_ctx->rb, len);
 	}
 
+	file_ctx->flac_samples_written = flac_writer_get_samples_written(writer);
+	file_ctx->flac_sample_rate_khz = srate;
 	flac_writer_error_t err = flac_writer_finish(writer);
+	file_ctx->flac_finish_ok = (err == FLAC_WRITER_OK);
 	if (err != FLAC_WRITER_OK) {
 		fprintf(stderr, "ERROR: FLAC encoder did not finish correctly\n");
 		new_line = 1;
@@ -895,13 +979,14 @@ int main(int argc, char **argv)
 	// out 1, 2
 	thrd_t thread_out[2] = { 0, 0 };
 	thrd_t thread_audio = 0;
-	filewriter_ctx_t thread_out_ctx[2];
+	filewriter_ctx_t thread_out_ctx[2] = {0};
 	audiowriter_ctx_t thread_audio_ctx;
 	char outbuffer_name[] = "outX_ringbuffer";
 
 	//file adress
 	// out 1, 2
 	char *output_names[2] = { NULL, NULL };
+	bool output_is_stdout[2] = { false, false };
 	char *output_name_aux = NULL;
 	char *output_name_raw = NULL;
 
@@ -1177,6 +1262,7 @@ int main(int argc, char **argv)
 	for(int i=0; i<2; i++) {
 		if (output_names[i] != NULL) {
 			if (file_open_write(&(thread_out_ctx[i].f),output_names[i],overwrite_files,true)) return -ENOENT;
+			output_is_stdout[i] = (thread_out_ctx[i].f == stdout);
 #if LIBSOXR_ENABLED == 1
 			thread_out_ctx[i].reduce_8bit = reduce_8bit[i];
 			if (out_size == 4) {
@@ -1391,6 +1477,34 @@ int main(int argc, char **argv)
 		}
 	}
 
+    int flac_metadata_errors = 0;
+#if LIBFLAC_ENABLED == 1
+    // Only the CLI capture path is affected. The encoder already closed the
+    // regular output file in flac_writer_finish(); never close it twice.
+    if (output_thread_func == (thrd_start_t)flac_file_writer) {
+        for (int i = 0; i < 2; ++i) {
+            if (!output_names[i] || output_is_stdout[i]) continue;
+            filewriter_ctx_t *ctx = &thread_out_ctx[i];
+            if (!ctx->flac_finish_ok) {
+                fprintf(stderr, "ERROR: FLAC channel %c did not finish successfully\n",
+                        (char)('A' + i));
+                flac_metadata_errors = 1;
+            } else if (ctx->flac_samples_written > 0) {
+                if (!cli_finalize_rf_flac_metadata(output_names[i],
+                                                    ctx->flac_samples_written,
+                                                    ctx->flac_sample_rate_khz)) {
+                    fprintf(stderr, "ERROR: Failed to finalize RF FLAC metadata: %s\n",
+                            output_names[i]);
+                    flac_metadata_errors = 1;
+                } else {
+                    fprintf(stderr, "[FLAC] RF duration metadata finalized: %s\n",
+                            output_names[i]);
+                }
+            }
+        }
+    }
+#endif
+
 	if (thread_audio!=0) {
 		r = thrd_join(thread_audio, NULL);
 		if (r != thrd_success) fprintf(stderr, "Failed to join audio thread.\n");
@@ -1402,5 +1516,5 @@ int main(int argc, char **argv)
 	        (unsigned)atomic_load(&cap_ctx.rb_audio_drop_count));
 	proc_set_priority(PROC_PRIORITY_NORMAL);
 
-	return 0;
+	return flac_metadata_errors;
 }
